@@ -102,6 +102,23 @@ body {
   border-color: var(--celeste-dash);
 }
 
+/* The folder route's own Start. It has to read as the primary action, because
+ * the launcher's Start button below it is inert until a zip is dropped. */
+.summit-bar button.primary {
+  border-color: var(--celeste-berry);
+  background: rgba(var(--celeste-berry-rgb), 0.28);
+  font-weight: 700;
+}
+
+.summit-bar button.primary:hover {
+  background: rgba(var(--celeste-berry-rgb), 0.42);
+}
+
+.summit-bar button:disabled {
+  opacity: 0.45;
+  cursor: default;
+}
+
 .summit-bar .install-status {
   flex: 1 1 16rem;
   min-width: 0;
@@ -136,6 +153,30 @@ main {
   /* The canvas is absolutely positioned inside whatever the template mounts,
    * so the stage has to carry the height itself. */
   height: calc(100vh - 3.5rem);
+}
+
+/* The shared stylesheet pins the stage to 5:4, which is right for the arcade
+ * cores it was written for and wrong for Celeste. `main .runtime` outranks it. */
+main .runtime {
+  position: relative;
+  aspect-ratio: 16 / 9;
+  width: min(100%, calc((100vh - 3.5rem) * 16 / 9));
+  height: auto;
+  max-height: 100%;
+  margin: 0 auto;
+  overflow: hidden;
+  background: #000;
+}
+
+/* The SDK writes these inline too, for hosts with no stylesheet of their own;
+ * repeating them here keeps the box right before the canvas is created. */
+main .runtime canvas {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  max-height: none;
+  aspect-ratio: auto;
 }
 
 .stage-message {

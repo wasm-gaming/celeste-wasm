@@ -54,6 +54,7 @@
     const { sdk, manifest, pickGameDirectory, gameDirectory, checkArchive, canPickDirectory } =
       window.CELESTE
 
+    const mainEl = document.querySelector('main')
     const statusEl = document.querySelector('.summit-bar .install-status')
     const setStatus = (text, bad = false) => {
       statusEl.textContent = text
@@ -70,23 +71,124 @@
       )
     }
 
+    // Everything both routes share. `attachTo` is whichever stage element the
+    // caller cleared for it.
+    const boot = async (stageEl, { assets = {}, gameDirectory, fileName }) => {
+      setStatus('Staging the game…')
+
+      const instance = await sdk.load({
+        attachTo: stageEl,
+        assets,
+        gameDirectory,
+        options: {
+          installFileName: fileName,
+          // Both routes check the listing before getting here.
+          verifyInstall: false,
+        },
+        onProgress(current, total) {
+          if (total > 0) {
+            setStatus(`Staging the game… ${Math.round((current / total) * 100)}%`)
+          }
+        },
+        onSplash(message) {
+          // Everest's own loading messages, forwarded from the mod loader.
+          if (message === null) setStatus('')
+          else if (message) setStatus(message)
+        },
+        onEvent(event) {
+          if (event.type === 'error') {
+            console.error(event.error)
+            setStatus(event.error.message, true)
+          } else {
+            console.log('[demo]', event.type)
+            if (event.type === 'ready') setStatus('')
+          }
+        },
+      })
+
+      instance.start()
+
+      // The first boot runs MonoMod over the whole game and takes minutes; the
+      // patched build is cached in storage from then on.
+      return instance
+    }
+
     // --- the folder route ---------------------------------------------------
     //
     // Preferred wherever it exists: no 1.3 GB archive for the player to build,
     // and the SDK copies the install across file by file.
+    //
+    // It needs its own trigger. The shared launcher's Start button gates on a
+    // *file* in its ROM slot (`canLaunch = Boolean(romFile && …)`), and a
+    // directory handle never puts one there — so that button would sit dead no
+    // matter how valid the folder is. This one takes over instead.
     const pickButton = document.getElementById('pick-folder')
+    let folderReady = false
+
+    const startFromFolder = async () => {
+      const stage = Object.assign(document.createElement('div'), { className: 'runtime' })
+      mainEl.replaceChildren(stage)
+      pickButton.disabled = true
+      try {
+        await boot(stage, { gameDirectory: gameDirectory(), fileName: 'Celeste (folder)' })
+      } catch (err) {
+        console.error(err)
+        setStatus(err.message, true)
+        showOnStage(stage, err.message)
+      }
+    }
+
+    // The launcher's own Start button, made to mean something.
+    //
+    // It gates on a file in its ROM slot, so for the folder route it is inert —
+    // and its disabled styling never applies, so it looks live while doing
+    // nothing at all. That is the worst possible state for the most obvious
+    // button on the page. The launcher renders into the light DOM (only the ESC
+    // menu uses renderShadow), so a capture-phase listener can reach it: route
+    // it to the folder when there is one, and say why when there is not.
+    mainEl.addEventListener(
+      'click',
+      (event) => {
+        if (!event.target.closest?.('.launch-btn')) return
+
+        if (folderReady) {
+          event.preventDefault()
+          event.stopPropagation()
+          void startFromFolder()
+        } else if (!demo.hasFile('rom')) {
+          event.preventDefault()
+          event.stopPropagation()
+          setStatus(
+            canPickDirectory
+              ? 'Nothing to start yet — pick your Celeste folder above, or drop a zip of it below.'
+              : 'Nothing to start yet — drop a zip of your Celeste folder below. (This browser cannot hand over a folder; Chrome can.)',
+            true,
+          )
+        }
+      },
+      true,
+    )
+
+    if (!canPickDirectory) {
+      setStatus('This browser cannot hand over a folder — supply a zip, or use Chrome.')
+    }
+
     if (canPickDirectory) {
       pickButton.hidden = false
       pickButton.addEventListener('click', async () => {
+        if (folderReady) return startFromFolder()
+
         setStatus('Reading folder…')
         try {
           const check = await pickGameDirectory()
           if (!check) return setStatus('')
+          if (!check.ok) return setStatus(check.reason, true)
+
+          folderReady = true
+          pickButton.textContent = 'Start ▸'
+          pickButton.classList.add('primary')
           setStatus(
-            check.ok
-              ? `Celeste found${check.hasEverest ? ' (already Everest-patched)' : ''} — press Start.`
-              : check.reason,
-            !check.ok,
+            `Celeste found${check.hasEverest ? ' (already Everest-patched)' : ''} — press Start above.`,
           )
         } catch (err) {
           setStatus(err.message, true)
@@ -120,60 +222,19 @@
           setStatus(`That does not look like a zip: ${err.message}`, true)
         }
       })
+      // The archive route. The shared launcher owns this button, and it only
+      // enables once a file is in its ROM slot — which is exactly why the
+      // folder route above needed a trigger of its own.
       .on('launch', async (e) => {
-        const directory = gameDirectory()
-
-        // The folder takes precedence: if the player picked one, the archive
-        // slot is irrelevant.
-        const assets = {}
-        if (!directory) {
-          const archive = await demo.loadToMEMFS('rom')
-          const check = await checkArchive(archive)
-          if (!check.ok) {
-            setStatus(check.reason, true)
-            showOnStage(e.attachTo, check.reason)
-            throw new Error(check.reason)
-          }
-          assets.game = archive
+        const archive = await demo.loadToMEMFS('rom')
+        const check = await checkArchive(archive)
+        if (!check.ok) {
+          setStatus(check.reason, true)
+          showOnStage(e.attachTo, check.reason)
+          throw new Error(check.reason)
         }
 
-        setStatus('Staging the game…')
-
-        const instance = await sdk.load({
-          attachTo: e.attachTo,
-          assets,
-          gameDirectory: directory ?? undefined,
-          options: {
-            installFileName: e.fileName,
-            // Already checked above; no need to walk the same listing twice.
-            verifyInstall: false,
-          },
-          onProgress(current, total) {
-            if (total > 0) {
-              setStatus(`Staging the game… ${Math.round((current / total) * 100)}%`)
-            }
-          },
-          onSplash(message) {
-            // Everest's own loading messages, forwarded from the mod loader.
-            if (message === null) setStatus('')
-            else if (message) setStatus(message)
-          },
-          onEvent(event) {
-            if (event.type === 'error') {
-              console.error(event.error)
-              setStatus(event.error.message, true)
-            } else {
-              console.log('[demo]', event.type)
-              if (event.type === 'ready') setStatus('')
-            }
-          },
-        })
-
-        instance.start()
-
-        // The first boot runs MonoMod over the whole game and takes minutes;
-        // the patched build is cached in storage from then on.
-        return instance
+        return boot(e.attachTo, { assets: { game: archive }, fileName: e.fileName })
       })
   </script>
 </body>
