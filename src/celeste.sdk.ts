@@ -21,6 +21,7 @@ import {
   MODS_DIR,
   opfsRoot,
   PATCHED_ASSEMBLY,
+  PATCHER_ASSEMBLIES,
   readFile,
   removePath,
   SAVES_DIR,
@@ -260,6 +261,7 @@ export async function importSaves(
  */
 const DERIVED_PATHS: readonly string[] = [
   PATCHED_ASSEMBLY,
+  ...PATCHER_ASSEMBLIES,
   EVEREST_ZIP,
   EVEREST_DIR,
   SAVES_DIR,
@@ -854,11 +856,18 @@ export async function load(config: CelesteLoadConfig): Promise<CelesteInstance> 
 
     /**
      * Drops what this package staged. `data` is the game itself — the install,
-     * the patched assembly and the Everest build; `settings` is Celeste's save
+     * the patched assemblies and the Everest build; `settings` is Celeste's save
      * directory, which holds the save files *and* the settings file.
      *
      * The loader mounts one OPFS root per origin, so this ignores
      * `storageNamespace`. Call it on a destroyed instance, or before `load()`.
+     *
+     * What it does *not* do is empty the root. A Celeste install is whatever the
+     * player's folder held — 25 top-level entries for a vanilla one, most of
+     * them assemblies this package could not name in advance — and deleting
+     * every entry at the root to catch them would take anything else sharing the
+     * origin with it. So the leftovers are the price of not doing that; see
+     * "What Celeste occupies in OPFS" in the README.
      */
     async purgeStorage(): Promise<{ data: boolean; settings: boolean }> {
       const removals = await Promise.all([
@@ -866,6 +875,9 @@ export async function load(config: CelesteLoadConfig): Promise<CelesteInstance> 
         removePath(root, 'Celeste.exe'),
         removePath(root, 'Celeste.dll'),
         removePath(root, PATCHED_ASSEMBLY),
+        // Hardcoded inside the loader rather than written by the SDK, so they
+        // are easy to miss — and they are what a repatch would rebuild anyway.
+        ...PATCHER_ASSEMBLIES.map((name) => removePath(root, name)),
         removePath(root, EVEREST_ZIP),
         removePath(root, EVEREST_DIR),
       ]);

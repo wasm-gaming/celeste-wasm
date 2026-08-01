@@ -58,6 +58,10 @@ const STAGED = {
   'Celeste/Mods/SomeMod.zip': 'mod',
   // Everything a boot puts back on its own:
   'CustomCeleste.dll': 'patched',
+  // Hardcoded inside CelesteLoader.dll rather than written by the SDK, so they
+  // appear in storage without anything here naming them.
+  'MMHOOK_Celeste.dll': 'hooks',
+  'Celeste.Mod.mm.dll': 'everest loader',
   'everest.zip': 'everest',
   'Celeste/Everest/Celeste.Mod.mm.dll': 'loader',
   'orig/Celeste.exe': 'vanilla backup',

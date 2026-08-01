@@ -98,6 +98,55 @@ if ((await stagedInstall()).ok) {
 }
 ```
 
+### What Celeste occupies in OPFS
+
+Short version: **the root of it**. There is no `celeste/` namespace to stay out
+of, and a host putting other engines on the same origin has to plan around that.
+
+The loader mounts the origin private filesystem at `/libsdl` and then reads and
+writes absolute paths under it — `/libsdl/Celeste.exe`, `/libsdl/Content`,
+`/libsdl/CustomCeleste.dll` and the rest are string literals inside
+`CelesteLoader.dll`. Since the mount *is* the origin's root, those literals are
+top-level OPFS entries, and nothing in the SDK can move them.
+
+What lands there falls into two groups.
+
+**This package's own, and a closed set:**
+
+| Entry | What it is |
+| --- | --- |
+| `Content/` | the game's assets, straight from the player's folder |
+| `Celeste.exe` / `Celeste.dll` | whichever executable their install presents |
+| `CustomCeleste.dll` | MonoMod's output: the game patched for WebAssembly |
+| `MMHOOK_Celeste.dll` | MonoMod's hook assembly |
+| `Celeste.Mod.mm.dll` | Everest's loader assembly |
+| `everest.zip` | the Everest build, before it is unpacked |
+| `Celeste/` | `Everest/`, `Mods/` and `Saves/` under one directory |
+
+**The player's install, and an open one.** Everything else in the folder they
+hand over is copied to the root as-is. A vanilla macOS install is 25 top-level
+entries — `FNA.dll`, `FNA3D.dll`, `mscorlib.dll`, nine `System.*.dll`,
+`Steamworks.NET.dll`, `gamecontrollerdb.txt`, `vulkan/` and so on — and the exact
+set varies by platform, by Steam vs itch, and by whether Everest has already
+been run on it. **This set cannot be enumerated in advance**, because it is
+whatever the player's Celeste directory contains.
+
+Two consequences worth planning around:
+
+- **A sibling engine on the same origin needs a prefix, and a distinctive one.**
+  Not because the names above are likely to collide — because the open set makes
+  "avoid Celeste's names" unverifiable. A prefix like `snes/` is fine; a bare
+  `Content/` or `System.dll` is not.
+- **`purgeStorage()` cannot empty the root, and does not try.** It removes the
+  closed set in the table plus the save directory. The player's stray assemblies
+  — a few tens of MB — stay behind, because the only way to catch them would be
+  deleting every entry at the root, which would take a sibling engine's data with
+  it. Emptying the whole origin is `navigator.storage`'s job, not this
+  package's, and it is the host that knows whether that is safe.
+
+Real isolation means moving those literals, which means rebuilding the managed
+loader — out of scope for this package, and tracked upstream.
+
 ### Taking the saves somewhere else
 
 Storage is per origin and per browser, so a player who switches machines loses
@@ -251,7 +300,7 @@ Where the contract and a full desktop game do not line up exactly:
 | `pause()` / `resume()` | No-ops with a warning. FNA drives its own loop on the render worker and exposes no handle on it; Escape opens Celeste's pause menu, which is the real pause. |
 | `reset()` | **Throws.** There is one .NET runtime per page and the canvas has already been transferred to a worker, so a power cycle means a reload. The contract allows this, and a silent no-op would be worse. |
 | `setInput()` | No-op with a warning. The game ships a key-mapping screen and Everest adds its own. |
-| `purgeStorage()` | Drops the staged install, the patched assembly and the Everest build (`data`), and Celeste's save directory (`settings`). The loader mounts one OPFS root per origin, so this ignores `storageNamespace`. |
+| `purgeStorage()` | Drops the staged install, the patched assemblies and the Everest build (`data`), and Celeste's save directory (`settings`). It does **not** empty the OPFS root — the player's own assemblies stay behind; see [What Celeste occupies in OPFS](#what-celeste-occupies-in-opfs). The loader mounts one OPFS root per origin, so this ignores `storageNamespace`. |
 | `saveState()` / `loadState()` | Not implemented; `capabilities.saveStates` is `false`. Celeste has its own save files. |
 | `load()` twice | Throws. The canvas cannot be transferred twice and the runtime cannot be unloaded. |
 
