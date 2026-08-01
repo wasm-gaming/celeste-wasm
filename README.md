@@ -130,8 +130,37 @@ Three things worth knowing:
   format is plain USTAR, and the test suite checks it against the system `tar`
   in both directions rather than only against itself.
 
-The install itself is deliberately not covered here: it is ~1.3 GB, and whether
-that belongs in a player's cloud storage is the host's call, not this package's.
+### And the install
+
+`exportInstall()` / `importInstall()` are the same idea for the game itself — so
+a player who already staged 1.1 GB on one machine does not hand over their
+Celeste folder again on the next:
+
+```js
+const check = await importInstall(await download(), {
+  onProgress: (files, bytes) => report(files, bytes),
+});
+if (!check.ok) throw new Error(check.reason);
+```
+
+Import returns the same acceptance check `load()` runs, so a restore that
+produced a directory of files rather than a bootable game says so.
+
+Two differences from the saves:
+
+- **It leaves out what the next boot rebuilds** — `CustomCeleste.dll`,
+  `everest.zip`, the unpacked `Celeste/Everest`, and Everest's `orig/` backup of
+  files the archive already carries. The player's `Celeste/Mods` *is* included;
+  nothing regenerates those. Saves are not, because they move on a different
+  cadence — an install goes once, a save goes every session.
+- **gzip is off by default**, and that is measured rather than assumed. 634 MB of
+  a 1.1 GB install are FMOD banks, which gzip takes about 1% off; the rest gives
+  up around 67%, for roughly 29% over the whole archive. Worth `{ gzip: true }`
+  on a slow connection, not worth pushing 634 MB through a compressor for
+  everyone by default.
+
+The demo wires the save half of this to two header buttons, which is the
+shortest way to see it work.
 
 Either way the listing goes through
 [`inspectInstall`](src/celeste.install.ts) first: it finds the install root

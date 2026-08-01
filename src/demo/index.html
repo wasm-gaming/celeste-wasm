@@ -24,6 +24,11 @@
     <span class="wordmark">CELESTE</span>
     <span class="badge">EVEREST</span>
     <button type="button" id="pick-folder" hidden>Use my Celeste folder…</button>
+    <!-- Saves live in OPFS, which is per browser and per origin. These are the
+         way back out of it, and the way in from another machine. -->
+    <button type="button" id="export-saves" hidden>Back up saves</button>
+    <button type="button" id="import-saves" hidden>Restore saves…</button>
+    <input type="file" id="saves-file" accept=".tar,.tar.gz,.tgz,.gz" hidden />
     <span class="install-status" role="status"></span>
     <span class="runtime-tag">page <b id="isolation">…</b></span>
   </header>
@@ -57,6 +62,8 @@
       pickGameDirectory,
       gameDirectory,
       stagedInstall,
+      exportSaves,
+      importSaves,
       checkArchive,
       canPickDirectory,
     } = window.CELESTE
@@ -382,6 +389,76 @@
 
         return boot(e.attachTo, { assets: { game: archive }, fileName: e.fileName })
       })
+
+    // --- carrying the saves off the machine ---------------------------------
+    //
+    // OPFS is per browser and per origin, so progress made here is stranded
+    // here unless something moves it. That is what a host syncing to a Drive
+    // would use the SDK's archive functions for; this is the same pair of calls
+    // with the network replaced by a download and a file picker.
+    //
+    // Both buttons live in the header, which goes away once the game is
+    // running — so neither can be pressed while Celeste is writing to a save,
+    // which is the one thing that would make an archive inconsistent.
+    const exportButton = document.getElementById('export-saves')
+    const importButton = document.getElementById('import-saves')
+    const savesFile = document.getElementById('saves-file')
+
+    const download = (blob, name) => {
+      const url = URL.createObjectURL(blob)
+      const link = Object.assign(document.createElement('a'), { href: url, download: name })
+      link.click()
+      // Revoking in the same tick loses the download on some browsers.
+      setTimeout(() => URL.revokeObjectURL(url), 10_000)
+    }
+
+    const kb = (bytes) => `${(bytes / 1024).toFixed(1)} kB`
+
+    exportButton.hidden = false
+    importButton.hidden = false
+
+    exportButton.addEventListener('click', async () => {
+      exportButton.disabled = true
+      setStatus('Packing your saves…')
+      try {
+        // Buffered into a Blob because a download needs one and a save archive
+        // is kilobytes. The SDK streams regardless — a host uploading this
+        // would pipe the stream straight into the request instead.
+        const archive = await new Response(await exportSaves()).blob()
+        const stamp = new Date().toISOString().slice(0, 10)
+        download(archive, `celeste-saves-${stamp}.tar.gz`)
+        setStatus(`Backed up ${kb(archive.size)} of saves.`)
+      } catch (err) {
+        setStatus(err.message, true)
+      } finally {
+        exportButton.disabled = false
+      }
+    })
+
+    importButton.addEventListener('click', () => savesFile.click())
+
+    savesFile.addEventListener('change', async () => {
+      const file = savesFile.files?.[0]
+      // Reset first: picking the same file twice should still fire.
+      savesFile.value = ''
+      if (!file) return
+
+      importButton.disabled = true
+      setStatus('Restoring saves…')
+      try {
+        const restored = await importSaves(file)
+        setStatus(
+          restored === 0
+            ? 'That archive had no saves in it.'
+            : `Restored ${restored} file${restored === 1 ? '' : 's'}. Reload to play them.`,
+          restored === 0,
+        )
+      } catch (err) {
+        setStatus(`That does not look like a save archive: ${err.message}`, true)
+      } finally {
+        importButton.disabled = false
+      }
+    })
 
     // --- the storage route --------------------------------------------------
     //

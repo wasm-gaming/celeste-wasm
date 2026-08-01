@@ -28,6 +28,10 @@ declare global {
       pickGameDirectory(): Promise<InstallCheck | null>;
       /** The install a previous session left in storage, if there is one. */
       stagedInstall(): Promise<InstallCheck>;
+      /** Saves and settings out of storage, as one gzipped tar. */
+      exportSaves(): Promise<ReadableStream<Uint8Array>>;
+      /** Put such an archive back. Returns how many files were written. */
+      importSaves(archive: Blob): Promise<number>;
       /** Run the same check over an archive, without unpacking it. */
       checkArchive(bytes: ArrayBuffer | Uint8Array | Blob): Promise<InstallCheck>;
       /** Whether this browser can hand over a directory at all. */
@@ -82,6 +86,8 @@ window.CELESTE = {
   gameDirectory: () => picked,
 
   stagedInstall: () => sdk.stagedInstall(),
+  exportSaves: () => sdk.exportSaves(),
+  importSaves: (archive) => sdk.importSaves(archive),
 
   async pickGameDirectory(): Promise<InstallCheck | null> {
     if (!showDirectoryPicker) {

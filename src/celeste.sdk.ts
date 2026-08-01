@@ -243,6 +243,122 @@ export async function importSaves(
   return restored;
 }
 
+// ---------------------------------------------------------------- the install
+
+/**
+ * What `exportInstall()` leaves out of the archive.
+ *
+ * Every one of these is either derived from the rest of it — MonoMod's output,
+ * the unpacked Everest build — or fetched, so carrying them would charge the
+ * player upload and storage for bytes the next boot produces anyway. `orig/` is
+ * Everest's backup of the vanilla game, which is a second copy of files the
+ * archive already has.
+ *
+ * Saves are excluded for a different reason: they have their own pair of
+ * functions and their own cadence. An install moves once; saves move every
+ * session, and nobody wants to push a gigabyte to move a checkpoint.
+ */
+const DERIVED_PATHS: readonly string[] = [
+  PATCHED_ASSEMBLY,
+  EVEREST_ZIP,
+  EVEREST_DIR,
+  SAVES_DIR,
+  'orig',
+];
+
+function isDerived(path: string): boolean {
+  return DERIVED_PATHS.some((prefix) => path === prefix || path.startsWith(`${prefix}/`));
+}
+
+export interface InstallExportOptions {
+  /**
+   * Compress the archive. Off, unlike `exportSaves()`, and measured rather than
+   * assumed: 634 MB of a 1.1 GB install are FMOD banks, which gzip takes about
+   * 1% off. The rest — atlases, assemblies — gives up around 67%, so the whole
+   * archive comes out roughly 29% smaller for the cost of pushing every byte
+   * through a compressor, most of them for nothing. Worth turning on for a slow
+   * connection; not worth doing to everyone by default.
+   */
+  gzip?: boolean;
+}
+
+/**
+ * The staged game, as one archive: what the player would otherwise have to
+ * supply all over again on another machine.
+ *
+ * The install is ~1.1 GB and arrives either as a folder the player picks or a
+ * zip they build. Neither is something to ask for twice, and a host that syncs
+ * storage can carry this instead — one object rather than the ~1,240 files the
+ * tree actually is, which matters when the far end charges per object.
+ *
+ * Streamed, so the archive is never resident. Paths are relative to the install
+ * root for the same reason the save archive's are.
+ */
+export async function exportInstall(
+  options: InstallExportOptions = {},
+): Promise<ReadableStream<Uint8Array>> {
+  const { gzip = false } = options;
+
+  const root = await opfsRoot();
+  const files = (await listFiles(root)).filter(({ path }) => !isDerived(path));
+
+  const archive = tarStream(
+    (async function* (): AsyncGenerator<TarSource> {
+      for (const { path, handle } of files) {
+        const file = await handle.getFile();
+        yield { path, size: file.size, body: () => file.stream() as ReadableStream<Uint8Array> };
+      }
+    })(),
+  );
+
+  if (!gzip) return archive;
+  if (typeof CompressionStream === 'undefined') {
+    throw new Error(
+      'celeste: this browser has no CompressionStream — call exportInstall({ gzip: false })',
+    );
+  }
+  return archive.pipeThrough(bytePipe(new CompressionStream('gzip')));
+}
+
+export interface InstallImportOptions {
+  /**
+   * Called as files land. There is no total: a tar carries no manifest, so the
+   * count is only ever "so far" — which is still what a gigabyte-long restore
+   * needs to show.
+   */
+  onProgress?: (files: number, bytes: number) => void;
+}
+
+/**
+ * Put an archive from `exportInstall()` back, and say what arrived.
+ *
+ * The return value is the same acceptance check `load()` runs, so a host can
+ * tell a restore that produced a bootable game from one that produced a
+ * directory of files. gzip is detected rather than declared.
+ *
+ * This trusts the archive exactly as much as `gameDirectory` trusts a folder
+ * the player picks — its contents become the game the runtime patches and
+ * executes. Paths that climb out of the archive are refused; what is inside it
+ * is the caller's to vouch for.
+ */
+export async function importInstall(
+  archive: ReadableStream<Uint8Array> | Blob | Uint8Array,
+  options: InstallImportOptions = {},
+): Promise<InstallCheck> {
+  const root = await opfsRoot();
+
+  let files = 0;
+  let bytes = 0;
+  for await (const entry of readTar(await inflateIfGzipped(toStream(archive)))) {
+    await writeFile(root, entry.path, entry.body);
+    files++;
+    bytes += entry.size;
+    options.onProgress?.(files, bytes);
+  }
+
+  return checkStaged(root);
+}
+
 function toStream(archive: ReadableStream<Uint8Array> | Blob | Uint8Array): ReadableStream<Uint8Array> {
   if (archive instanceof Blob) return archive.stream() as ReadableStream<Uint8Array>;
   if (archive instanceof Uint8Array) {
@@ -1048,4 +1164,12 @@ async function lockKeyboard(): Promise<void> {
   }
 }
 
-export default { manifest, load, stagedInstall, exportSaves, importSaves };
+export default {
+  manifest,
+  load,
+  stagedInstall,
+  exportSaves,
+  importSaves,
+  exportInstall,
+  importInstall,
+};
