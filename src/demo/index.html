@@ -51,8 +51,15 @@
 
     import demo from './demo/demo.js'
 
-    const { sdk, manifest, pickGameDirectory, gameDirectory, checkArchive, canPickDirectory } =
-      window.CELESTE
+    const {
+      sdk,
+      manifest,
+      pickGameDirectory,
+      gameDirectory,
+      stagedInstall,
+      checkArchive,
+      canPickDirectory,
+    } = window.CELESTE
 
     const mainEl = document.querySelector('main')
     const statusEl = document.querySelector('.summit-bar .install-status')
@@ -232,13 +239,24 @@
     // puts one there.
     const pickButton = document.getElementById('pick-folder')
     let folderReady = false
+    let stagedReady = false
 
-    const startFromFolder = async () => {
+    const STAGED_MESSAGE = canPickDirectory
+      ? "Celeste is already in this browser's storage — press Start, or pick a folder to replace it."
+      : "Celeste is already in this browser's storage — press Start, or drop a zip to replace it."
+
+    // Serves both routes. When no folder was picked `gameDirectory()` is null,
+    // and the SDK falls through to whatever a previous session staged — which
+    // is the whole point of the storage probe below.
+    const startGame = async () => {
       const stage = Object.assign(document.createElement('div'), { className: 'runtime' })
       mainEl.replaceChildren(stage)
       pickButton.disabled = true
       try {
-        await boot(stage, { gameDirectory: gameDirectory(), fileName: 'Celeste (folder)' })
+        await boot(stage, {
+          gameDirectory: gameDirectory(),
+          fileName: folderReady ? 'Celeste (folder)' : 'Celeste (in storage)',
+        })
       } catch (err) {
         console.error(err)
         // boot() has already put the message on the HUD and brought the header
@@ -251,24 +269,28 @@
 
     // The launcher's own Start button, made to mean something.
     //
-    // It gates on a file in its ROM slot, so for the folder route it is inert —
-    // and its disabled styling never applies, so it looks live while doing
-    // nothing at all. That is the worst possible state for the most obvious
-    // button on the page. The launcher renders into the light DOM (only the ESC
-    // menu uses renderShadow), so a capture-phase listener can reach it: route
-    // it to the folder when there is one, and say why when there is not.
+    // It gates on a file in its ROM slot, so for the folder and storage routes
+    // it is inert — and its disabled styling never applies, so it looks live
+    // while doing nothing at all. That is the worst possible state for the most
+    // obvious button on the page. The launcher renders into the light DOM (only
+    // the ESC menu uses renderShadow), so a capture-phase listener can reach it.
+    //
+    // Which route wins is a question of how recently the player said so: a
+    // folder they just picked beats a zip they just dropped, and both beat
+    // whatever a previous session left in storage. The zip is the launcher's own
+    // route, so standing aside is all that route needs.
     mainEl.addEventListener(
       'click',
       (event) => {
         if (!event.target.closest?.('.launch-btn')) return
+        if (!folderReady && demo.hasFile('rom')) return
 
-        if (folderReady) {
-          event.preventDefault()
-          event.stopPropagation()
-          void startFromFolder()
-        } else if (!demo.hasFile('rom')) {
-          event.preventDefault()
-          event.stopPropagation()
+        event.preventDefault()
+        event.stopPropagation()
+
+        if (folderReady || stagedReady) {
+          void startGame()
+        } else {
           setStatus(
             canPickDirectory
               ? 'Nothing to start yet — pick your Celeste folder above, or drop a zip of it below.'
@@ -295,13 +317,19 @@
           const check = await pickGameDirectory()
           // Dialog closed: whatever was picked before is still picked.
           if (!check) {
-            return setStatus(folderReady ? 'Celeste found — press Start.' : '')
+            if (folderReady) return setStatus('Celeste found — press Start.')
+            return setStatus(stagedReady ? STAGED_MESSAGE : '')
           }
           // A folder that does not check out replaces the one that did —
-          // pickGameDirectory only keeps the handle when the check passes.
+          // pickGameDirectory only keeps the handle when the check passes. A
+          // staged install is still there to start, and saying so beats leaving
+          // a live Start button under an error message.
           if (!check.ok) {
             folderReady = false
-            return setStatus(check.reason, true)
+            return setStatus(
+              stagedReady ? `${check.reason} Start will use the copy already in storage.` : check.reason,
+              true,
+            )
           }
 
           folderReady = true
@@ -354,6 +382,31 @@
 
         return boot(e.attachTo, { assets: { game: archive }, fileName: e.fileName })
       })
+
+    // --- the storage route --------------------------------------------------
+    //
+    // The staged install persists in OPFS, so a reload does not need the game
+    // again — the SDK boots from storage when nothing is supplied. Nothing on
+    // the page would ever discover that on its own, though: the launcher gates
+    // Start on a file in its ROM slot, the picker starts empty on every load,
+    // and neither survives a refresh. So ask storage directly, once, and turn
+    // Start on if the answer is a Celeste that checks out.
+    //
+    // Last, so the launcher's own status render cannot land on top of it.
+    void (async () => {
+      try {
+        const staged = await stagedInstall()
+        if (!staged.ok) return
+        stagedReady = true
+        // A folder picked or a zip dropped while this was in flight is the more
+        // specific intent, and its own message is already on screen.
+        if (folderReady || demo.hasFile('rom')) return
+        setStatus(STAGED_MESSAGE)
+      } catch {
+        // No storage to read, which is a browser that cannot run the game
+        // either — the routes above will say so in their own terms.
+      }
+    })()
   </script>
 </body>
 </html>

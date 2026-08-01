@@ -76,13 +76,62 @@ whole job:
 1. **The folder route.** Where `showDirectoryPicker` exists, pass the handle as
    `gameDirectory` and the SDK copies the install across file by file. This is
    the one to prefer — a Celeste install is ~1.3 GB and asking a player to zip
-   it first is a poor trade.
+   it first is a poor trade. The copy is resumable: a file already in storage at
+   the same size is left alone, so handing the folder over again after an
+   interrupted copy finishes the job instead of redoing it.
 2. **The archive route.** Otherwise pass a zip as `assets.game`. It is read
    through [src/celeste.zip.ts](src/celeste.zip.ts) — central directory off a
    `Blob`, each entry inflated straight into storage — so the archive is never
    resident in memory.
 3. **Neither.** If storage already holds a valid install from a previous
    session, `load()` uses it. That is the common case on a reload.
+
+Ask before you offer, with `stagedInstall()`: it runs the same acceptance check
+over what is in storage, so a host can turn its Start button on after a refresh
+instead of sending the player back to the folder picker.
+
+```js
+import { stagedInstall } from '@wasm-gaming/celeste-wasm';
+
+if ((await stagedInstall()).ok) {
+  // Nothing to supply — load() will boot what is already there.
+}
+```
+
+### Taking the saves somewhere else
+
+Storage is per origin and per browser, so a player who switches machines loses
+their progress unless the host moves it for them. `exportSaves()` and
+`importSaves()` are the substrate for that — a gzipped tar of Celeste's save
+directory, streamed in both directions so nothing is ever resident:
+
+```js
+import { exportSaves, importSaves } from '@wasm-gaming/celeste-wasm';
+
+// Upload. The stream reads out of storage as the request consumes it.
+await upload(await exportSaves());
+
+// Restore. gzip is detected, not declared.
+const restored = await importSaves(await download());
+```
+
+Three things worth knowing:
+
+- **Paths inside the archive are relative to the save directory** — `0.celeste`,
+  not `Celeste/Saves/0.celeste`. Where this package keeps its files may change;
+  an archive already in someone's Drive should keep restoring when it does.
+- **Import merges.** A save the archive carries replaces the one in storage; a
+  save only storage has is left alone. Restoring cannot destroy a file the
+  backup never knew about. Call `purgeStorage()` first if the archive should be
+  the whole truth.
+- **It is tar, not zip**, because a zip cannot be finished until its central
+  directory is written at the end — you would have to buffer the archive or seek
+  back over it, and a page piping storage into an upload can do neither. The
+  format is plain USTAR, and the test suite checks it against the system `tar`
+  in both directions rather than only against itself.
+
+The install itself is deliberately not covered here: it is ~1.3 GB, and whether
+that belongs in a player's cloud storage is the host's call, not this package's.
 
 Either way the listing goes through
 [`inspectInstall`](src/celeste.install.ts) first: it finds the install root
@@ -194,27 +243,46 @@ fails with that message rather than somewhere deep in the runtime.
 ## Build
 
 ```bash
-make build          # runtime + Everest + SDK
-make build-sdk      # TS only
-make build-runtime  # install the .NET WASM runtime → dist/celeste/_framework/
-make build-everest  # compile the pinned Everest → dist/celeste/everest.zip
+make build          # runtime + Everest (in Docker) + SDK
+make build-sdk      # TS only, on the host
 make preview        # serves dist/ with COOP/COEP
 make test           # typecheck + node test runner
 ```
 
-`make build-everest` needs the .NET 9 SDK and, on Linux and macOS, mono for
-`ilasm` — MonoMod's IL projects assemble through `Microsoft.Net.Sdk.IL`, which
-has no cross-platform assembler of its own. If you would rather not install
-either:
+**`make build` runs the native half in Docker, always.** That half wants the
+.NET 9 SDK, mono's `ilasm` (MonoMod's IL projects assemble through
+`Microsoft.Net.Sdk.IL`, which ships no cross-platform assembler) and mono's `sn`
+to strong-name NLua. Nobody should have to install three toolchains to work on a
+TypeScript SDK, and missing any of them surfaces minutes into a build as a
+linker error that looks like nothing to do with the cause. The TypeScript half
+runs on the host and needs only node.
+
+The container bind-mounts the workspace, so `.tmp/` (upstream checkout, NuGet
+cache) and `dist/` land on the host and a second run reuses them. The image is
+built for the host's own architecture; `PLATFORM=linux/amd64` gets CI's instead.
+
+For a machine that does have the toolchain, the same build without the
+container:
 
 ```bash
-make build-everest-docker   # just Everest, in a container that has both
-make build-wasm-docker      # runtime + Everest, same container
+make build-wasm     # runtime + Everest, on the host
+make build-runtime  # install the .NET WASM runtime → dist/celeste/_framework/
+make build-everest  # compile the pinned Everest → dist/celeste/everest.zip
 ```
 
-Both bind-mount the workspace, so `.tmp/` (upstream checkout, NuGet cache) and
-`dist/` land on the host and a second run reuses them. The image is built for
-the host's own architecture; `PLATFORM=linux/amd64` gets CI's instead.
+### Testing against a real install
+
+Most of the test suite works from listings it writes itself, which only proves
+the code agrees with the tests. Symlink a Celeste install in and a few of them
+run against the real thing instead — the acceptance check, and the depth cap
+`stagedInstall()` walks with:
+
+```bash
+ln -s /path/to/Celeste .tmp/Celeste-game
+```
+
+They skip when it is not there, so this is optional. Nothing is copied and
+nothing is written to it.
 
 Everest pulls MonoMod, NLua and `lib-ext` in as **submodules**, and
 `Celeste.Mod.mm` and `NETCoreifier` reference them by project path. The build

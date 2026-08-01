@@ -6,7 +6,7 @@ import type {
   InputPreset,
   KeyMap,
 } from '@wasm-gaming/engine-specs';
-import { inspectInstall, type InstallCheck } from './celeste.install.js';
+import { inspectInstall, REQUIRED_ENTRIES, type InstallCheck } from './celeste.install.js';
 import { manifest } from './celeste.manifest.js';
 import {
   copyDirectoryInto,
@@ -16,6 +16,7 @@ import {
   EVEREST_ZIP,
   exists,
   extractInto,
+  listFiles,
   listPaths,
   MODS_DIR,
   opfsRoot,
@@ -40,6 +41,7 @@ import {
   type DotnetRuntimeAPI,
   type SplashProgress,
 } from './celeste.runtime.js';
+import { readTar, tarStream, type TarSource } from './celeste.tar.js';
 import { ZipReader } from './celeste.zip.js';
 
 export { manifest };
@@ -110,6 +112,187 @@ export type CelesteLoadConfig = EngineConfig & {
  * would silently draw nothing, so it fails loudly instead.
  */
 let pageInstance: CelesteInstance | null = null;
+
+/**
+ * How deep the install check can see, in path segments.
+ *
+ * Nothing past the longest path it asks about tells it anything, and the walk
+ * is not free: against a vanilla install this reads 209 entries out of storage
+ * instead of 1,289.
+ */
+const INSTALL_CHECK_DEPTH = Math.max(...REQUIRED_ENTRIES.map((entry) => entry.split('/').length));
+
+/**
+ * The acceptance check, run against storage.
+ *
+ * Depth-capped because this package stages flat: whatever route the install
+ * came in through, `Celeste.exe` lands at the top and the check has no question
+ * that a deeper entry could answer.
+ */
+async function checkStaged(root: FileSystemDirectoryHandle): Promise<InstallCheck> {
+  return inspectInstall(await listPaths(root, '', { depth: INSTALL_CHECK_DEPTH }));
+}
+
+/**
+ * What a previous session left in storage.
+ *
+ * The staged install persists, so after a reload `load()` will boot from it
+ * with no game supplied at all. This is how a host finds that out *before*
+ * asking the player for their Celeste folder again — which is friction on the
+ * archive route and a second ~1.3 GB copy on the folder one.
+ *
+ * The check is the same one the boot path runs. Throws where there is no
+ * origin private filesystem, which is a browser that cannot run the game either.
+ */
+export async function stagedInstall(): Promise<InstallCheck> {
+  return checkStaged(await opfsRoot());
+}
+
+// ----------------------------------------------------------------- the saves
+
+/**
+ * `CompressionStream` and its inverse declare a `BufferSource` writable side,
+ * which will not unify with a `ReadableStream<Uint8Array>` however the pipe is
+ * written — lib.dom types the pair more loosely than `pipeThrough` accepts.
+ * The bytes on the wire are the same either way.
+ */
+function bytePipe(pair: CompressionStream | DecompressionStream): ReadableWritablePair<
+  Uint8Array,
+  Uint8Array
+> {
+  return pair as unknown as ReadableWritablePair<Uint8Array, Uint8Array>;
+}
+
+export interface ExportOptions {
+  /**
+   * Compress the archive. Celeste's saves are YAML and shrink by a lot, and the
+   * whole point of the archive is that it crosses a network, so this is on.
+   */
+  gzip?: boolean;
+}
+
+/**
+ * The player's saves and settings, as one archive.
+ *
+ * Meant for a host that syncs storage somewhere the player owns — a Drive, a
+ * Box, a server of their own. It is one archive rather than a file listing
+ * because those APIs charge per object, and `Celeste/Saves` is small but not
+ * always one file: Everest gives every mod a save of its own.
+ *
+ * Nothing is buffered. The result is a stream that reads out of storage as it
+ * is consumed, so it can go straight into an upload.
+ *
+ * Paths inside the archive are relative to the save directory — `0.celeste`,
+ * not `Celeste/Saves/0.celeste`. That is deliberate: where this package keeps
+ * its files is its own business and may yet change, and an archive already
+ * sitting in someone's Drive should not stop restoring when it does.
+ */
+export async function exportSaves(options: ExportOptions = {}): Promise<ReadableStream<Uint8Array>> {
+  const { gzip = true } = options;
+
+  const files = await listFiles(await opfsRoot(), SAVES_DIR);
+  const archive = tarStream(
+    (async function* (): AsyncGenerator<TarSource> {
+      for (const { path, handle } of files) {
+        // One File snapshot per entry: `size` goes in the header and the body
+        // has to be the bytes that size describes.
+        const file = await handle.getFile();
+        yield {
+          path,
+          size: file.size,
+          body: () => file.stream() as ReadableStream<Uint8Array>,
+        };
+      }
+    })(),
+  );
+
+  if (!gzip) return archive;
+  if (typeof CompressionStream === 'undefined') {
+    throw new Error(
+      'celeste: this browser has no CompressionStream — call exportSaves({ gzip: false }) and compress the stream yourself',
+    );
+  }
+  return archive.pipeThrough(bytePipe(new CompressionStream('gzip')));
+}
+
+/**
+ * Put an archive from `exportSaves()` back.
+ *
+ * gzip is detected rather than declared, so an archive compressed on the way
+ * out restores without the caller having to remember which it was.
+ *
+ * This merges: a save the archive carries replaces the one in storage, and a
+ * save only storage has is left alone. Restoring should not be able to destroy
+ * a file the backup never knew about — a host that wants the archive to be the
+ * whole truth should `purgeStorage()` first.
+ *
+ * Returns how many files were written.
+ */
+export async function importSaves(
+  archive: ReadableStream<Uint8Array> | Blob | Uint8Array,
+): Promise<number> {
+  const root = await opfsRoot();
+
+  let restored = 0;
+  for await (const entry of readTar(await inflateIfGzipped(toStream(archive)))) {
+    // `readTar` has already refused anything that climbs out of the archive,
+    // which matters here: this writes into a directory the game reads.
+    await writeFile(root, `${SAVES_DIR}/${entry.path}`, entry.body);
+    restored++;
+  }
+  return restored;
+}
+
+function toStream(archive: ReadableStream<Uint8Array> | Blob | Uint8Array): ReadableStream<Uint8Array> {
+  if (archive instanceof Blob) return archive.stream() as ReadableStream<Uint8Array>;
+  if (archive instanceof Uint8Array) {
+    return new Blob([archive as BufferSource]).stream() as ReadableStream<Uint8Array>;
+  }
+  return archive;
+}
+
+/**
+ * Unwrap gzip if that is what this is, by looking rather than asking.
+ *
+ * The first two bytes say so, so the stream is peeked and then handed on with
+ * those bytes put back in front of it.
+ */
+async function inflateIfGzipped(
+  stream: ReadableStream<Uint8Array>,
+): Promise<ReadableStream<Uint8Array>> {
+  const reader = stream.getReader();
+
+  let head = new Uint8Array(0);
+  while (head.length < 2) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    if (!value?.length) continue;
+    const next = new Uint8Array(head.length + value.length);
+    next.set(head);
+    next.set(value, head.length);
+    head = next;
+  }
+
+  const rejoined = new ReadableStream<Uint8Array>({
+    start(controller) {
+      if (head.length) controller.enqueue(head);
+    },
+    async pull(controller) {
+      const { done, value } = await reader.read();
+      if (done) controller.close();
+      else if (value?.length) controller.enqueue(value);
+    },
+    cancel(reason) {
+      void reader.cancel(reason);
+    },
+  });
+
+  if (head[0] !== 0x1f || head[1] !== 0x8b) return rejoined;
+  if (typeof DecompressionStream === 'undefined') {
+    throw new Error('celeste: this archive is gzipped and this browser has no DecompressionStream');
+  }
+  return rejoined.pipeThrough(bytePipe(new DecompressionStream('gzip')));
+}
 
 function toBytes(value: unknown): Uint8Array | Blob | null {
   if (value == null) return null;
@@ -694,7 +877,7 @@ async function stageGame(
     (config.gameProvider ? toBytes(await config.gameProvider()) : null);
 
   if (!supplied) {
-    const existing = inspectInstall(await listPaths(root));
+    const existing = await checkStaged(root);
     if (existing.ok) return existing;
     throw new Error(
       'celeste: no game supplied and none in storage — pass assets.game (a zip of your Celeste folder), options.gameDirectory, or gameProvider',
@@ -713,9 +896,16 @@ async function stageGame(
       filter: (path) => !path.startsWith('orig/'),
       onProgress: report,
     });
-    return inspectInstall(await listPaths(root));
+    return checkStaged(root);
   }
 
+  // The one walk that has to be exhaustive. `root` above is this package's own
+  // layout — always flat, always shallow — but this is the folder the *player*
+  // picked, and they are allowed to hand over a parent of their install: the
+  // `descend` below exists for exactly that. Capping the depth here would put a
+  // ceiling on how deeply nested a folder may be before the check stops finding
+  // Celeste in it, which is a worse trade than the walk costs. The copy is
+  // about to enumerate the same tree anyway.
   const listing = inspectInstall(await listPaths(supplied));
   if (opts.verifyInstall && !listing.ok) return listing;
 
@@ -725,7 +915,7 @@ async function stageGame(
     '',
     report,
   );
-  return inspectInstall(await listPaths(root));
+  return checkStaged(root);
 }
 
 async function descend(
@@ -858,4 +1048,4 @@ async function lockKeyboard(): Promise<void> {
   }
 }
 
-export default { manifest, load };
+export default { manifest, load, stagedInstall, exportSaves, importSaves };

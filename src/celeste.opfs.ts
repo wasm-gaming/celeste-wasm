@@ -144,6 +144,20 @@ export async function exists(root: FileSystemDirectoryHandle, path: string): Pro
   }
 }
 
+export interface ListOptions {
+  /** Stop after this many entries. */
+  limit?: number;
+  /**
+   * Do not descend past this many path segments.
+   *
+   * A caller that only needs the top of the tree should say so. Measured
+   * against a vanilla install, stopping at 4 segments — as deep as the install
+   * check ever looks — lists 209 entries where a full walk lists 1,289. Over
+   * OPFS every one of those is an async round trip.
+   */
+  depth?: number;
+}
+
 /**
  * Every path under `path`, relative to it. Used to run the install check
  * against what actually made it into storage, and to decide whether a previous
@@ -152,24 +166,30 @@ export async function exists(root: FileSystemDirectoryHandle, path: string): Pro
 export async function listPaths(
   root: FileSystemDirectoryHandle,
   path = '',
-  limit = Infinity,
+  options: ListOptions = {},
 ): Promise<string[]> {
+  const { limit = Infinity, depth = Infinity } = options;
+
   const start = await directoryOf(root, path, false);
   if (!start) return [];
 
   const out: string[] = [];
-  const walk = async (handle: FileSystemDirectoryHandle, prefix: string): Promise<void> => {
+  const walk = async (
+    handle: FileSystemDirectoryHandle,
+    prefix: string,
+    level: number,
+  ): Promise<void> => {
     for await (const [name, entry] of (handle as IterableDirectory).entries()) {
       if (out.length >= limit) return;
       const child = prefix ? `${prefix}/${name}` : name;
       out.push(child);
-      if (entry.kind === 'directory') {
-        await walk(entry as FileSystemDirectoryHandle, child);
+      if (entry.kind === 'directory' && level < depth) {
+        await walk(entry as FileSystemDirectoryHandle, child, level + 1);
       }
     }
   };
 
-  await walk(start, '');
+  await walk(start, '', 1);
   return out;
 }
 
@@ -243,12 +263,69 @@ export async function extractInto(
   return done;
 }
 
+/** A file somewhere under the directory that was walked. */
+export interface FoundFile {
+  /** Path relative to where the walk started. */
+  path: string;
+  handle: FileSystemFileHandle;
+}
+
+/**
+ * Every file under `path`, depth first. Empty when `path` is not there.
+ *
+ * Unlike `listPaths` this yields the handles, so the caller can read what it
+ * found without resolving each path a second time.
+ */
+export async function listFiles(
+  root: FileSystemDirectoryHandle,
+  path = '',
+): Promise<FoundFile[]> {
+  const start = await directoryOf(root, path, false);
+  if (!start) return [];
+
+  const files: FoundFile[] = [];
+  const walk = async (handle: FileSystemDirectoryHandle, prefix: string): Promise<void> => {
+    for await (const [name, entry] of (handle as IterableDirectory).entries()) {
+      const child = prefix ? `${prefix}/${name}` : name;
+      if (entry.kind === 'directory') {
+        await walk(entry as FileSystemDirectoryHandle, child);
+      } else {
+        files.push({ path: child, handle: entry as FileSystemFileHandle });
+      }
+    }
+  };
+
+  await walk(start, '');
+  return files;
+}
+
+/** Every file under `path`, mapped to its size. Empty when `path` is not there. */
+async function fileSizes(
+  root: FileSystemDirectoryHandle,
+  path: string,
+): Promise<Map<string, number>> {
+  const sizes = new Map<string, number>();
+  for (const { path: found, handle } of await listFiles(root, path)) {
+    sizes.set(found, (await handle.getFile()).size);
+  }
+  return sizes;
+}
+
 /**
  * Copy a directory the player picked straight across.
  *
  * This is the path worth taking when the browser has `showDirectoryPicker`: no
- * archive to build on the player's side, no inflate on ours, and the copy can
- * be resumed because it skips files that are already there at the same size.
+ * archive to build on the player's side, and no inflate on ours.
+ *
+ * The copy is resumable: storage is indexed once up front and a file already
+ * there at the same size is left alone. That matters because the alternative is
+ * rewriting ~1.3 GB whenever a player hands the folder over again — after a
+ * copy they interrupted, or one the page could not offer to resume. Size is a
+ * weak identity, but the case it has to catch is the truncated file an aborted
+ * write leaves behind, and it catches that.
+ *
+ * Returns the number of files actually written; `onProgress` counts every file
+ * considered, so its `done`/`total` stays a real position in the work.
  */
 export async function copyDirectoryInto(
   source: FileSystemDirectoryHandle,
@@ -256,28 +333,25 @@ export async function copyDirectoryInto(
   into = '',
   onProgress?: (progress: StageProgress) => void,
 ): Promise<number> {
-  const files: Array<{ path: string; handle: FileSystemFileHandle }> = [];
+  const files = await listFiles(source);
 
-  const collect = async (handle: FileSystemDirectoryHandle, prefix: string): Promise<void> => {
-    for await (const [name, entry] of (handle as IterableDirectory).entries()) {
-      const child = prefix ? `${prefix}/${name}` : name;
-      if (entry.kind === 'directory') {
-        await collect(entry as FileSystemDirectoryHandle, child);
-      } else {
-        files.push({ path: child, handle: entry as FileSystemFileHandle });
-      }
-    }
-  };
-  await collect(source, '');
+  // One walk of the destination, rather than a lookup per file: on a fresh
+  // install this finds nothing and costs nothing, and on a resumed one it is
+  // what turns a thousand-odd writes into a thousand-odd map hits.
+  const staged = await fileSizes(root, into);
 
   let done = 0;
+  let written = 0;
   for (const { path, handle } of files) {
-    const target = into ? `${into}/${path}` : path;
     const file = await handle.getFile();
-    await writeFile(root, target, file.stream() as ReadableStream<Uint8Array>);
+    if (staged.get(path) !== file.size) {
+      const target = into ? `${into}/${path}` : path;
+      await writeFile(root, target, file.stream() as ReadableStream<Uint8Array>);
+      written++;
+    }
     done++;
     onProgress?.({ done, total: files.length, path });
   }
 
-  return done;
+  return written;
 }

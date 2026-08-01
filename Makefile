@@ -8,6 +8,16 @@
 # pinned upstream checkout; `make build-runtime` fetches the pinned .NET
 # WebAssembly runtime that hosts it. The game itself is supplied by the player
 # at runtime and never leaves their browser.
+#
+# The native half of that build goes through Docker, always. It wants the .NET 9
+# SDK, mono's ilasm (MonoMod's IL projects assemble through Microsoft.Net.Sdk.IL,
+# which ships no cross-platform assembler) and mono's `sn` to strong-name NLua —
+# three things nobody should have to install to work on a TypeScript SDK, and
+# whose absence surfaces as a linker error three minutes into a build. The
+# TypeScript half runs on the host, where it needs nothing but node.
+#
+# `build-wasm` and the targets under it are the same build without the
+# container, for a machine that already has that toolchain.
 
 BIN := node_modules/.bin
 
@@ -54,7 +64,7 @@ node_modules: package.json
 	npm install
 	@touch node_modules
 
-build: build-wasm build-sdk ## Full build → dist/ (runtime + Everest first, then SDK/demo)
+build: build-wasm-docker build-sdk ## Full build → dist/ (runtime + Everest in Docker, then SDK/demo)
 
 build-sdk: build-lib build-manifest build-demo ## TypeScript + manifest + demo shell
 
@@ -73,19 +83,23 @@ build-demo: build-lib ## Compile the demo page + copy the shared template
 	cp src/demo/coi.js dist/coi.js
 	cp src/demo/_headers dist/_headers
 
-build-wasm: build-runtime build-everest ## Runtime + Everest → dist/celeste/
+build-wasm-docker: ## Runtime + Everest → dist/celeste/, in a pinned Linux container
+	bash scripts/build-celeste-web-docker.sh build-wasm
+
+build-everest-docker: ## Just the Everest build, in that container
+	bash scripts/build-everest-docker.sh
+
+# --- on the host -------------------------------------------------------------
+# What the container runs, and what a machine with dotnet + mono can run
+# directly. `make build` does not reach these: it goes through Docker.
+
+build-wasm: build-runtime build-everest ## Runtime + Everest, no container (needs dotnet + mono)
 
 build-runtime: ## Fetch (or build) the .NET WASM runtime → dist/celeste/_framework/
 	bash scripts/build-celeste-runtime.sh
 
 build-everest: ## Compile the pinned Everest checkout → dist/celeste/everest.zip
 	bash scripts/build-everest.sh
-
-build-wasm-docker: ## Same build, inside a pinned Linux container (has dotnet + ilasm)
-	bash scripts/build-celeste-web-docker.sh build-wasm
-
-build-everest-docker: ## Just the Everest build, in that container
-	bash scripts/build-everest-docker.sh
 
 typecheck: build-lib
 	$(BIN)/tsc -p tsconfig.json --noEmit

@@ -26,6 +26,10 @@
       "types": "./dist/celeste/celeste.install.d.ts",
       "import": "./dist/celeste/celeste.install.js"
     },
+    "./tar": {
+      "types": "./dist/celeste/celeste.tar.d.ts",
+      "import": "./dist/celeste/celeste.tar.js"
+    },
     "./zip": {
       "types": "./dist/celeste/celeste.zip.d.ts",
       "import": "./dist/celeste/celeste.zip.js"
@@ -44,6 +48,7 @@
     "src/celeste.options.ts",
     "src/celeste.runtime.ts",
     "src/celeste.sdk.ts",
+    "src/celeste.tar.ts",
     "src/celeste.xxh64.ts",
     "src/celeste.zip.ts",
     "README.md",

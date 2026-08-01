@@ -1,5 +1,8 @@
 import assert from 'node:assert/strict';
+import { existsSync, readdirSync, statSync } from 'node:fs';
+import { join } from 'node:path';
 import test from 'node:test';
+import { fileURLToPath } from 'node:url';
 
 import {
   EXECUTABLES,
@@ -143,4 +146,62 @@ test('an empty listing is rejected rather than throwing', () => {
   const check = inspectInstall([]);
   assert.equal(check.ok, false);
   assert.equal(check.root, '');
+});
+
+// ------------------------------------------------------- against a real one --
+//
+// Every listing above is one this file wrote, which means they all agree with
+// whatever this file believes a Celeste install looks like. Point the check at
+// an actual install and that assumption is the thing being tested.
+//
+// Symlink one in to enable this:  ln -s /path/to/Celeste .tmp/Celeste-game
+
+const GAME_DIR = fileURLToPath(new URL('../.tmp/Celeste-game', import.meta.url));
+const HAS_GAME = existsSync(GAME_DIR);
+
+/** Every path under `dir`, the way a recursive walk of storage would give it. */
+function walkGame(dir, prefix = '') {
+  const out = [];
+  for (const name of readdirSync(dir)) {
+    const path = prefix ? `${prefix}/${name}` : name;
+    out.push(path);
+    try {
+      if (statSync(join(dir, name)).isDirectory()) out.push(...walkGame(join(dir, name), path));
+    } catch {
+      // A dangling symlink inside the install is not this check's problem.
+    }
+  }
+  return out;
+}
+
+test('a real Celeste install is accepted', { skip: !HAS_GAME }, () => {
+  const check = inspectInstall(walkGame(GAME_DIR));
+
+  assert.equal(check.ok, true, check.reason);
+  assert.equal(check.root, '');
+  assert.deepEqual(check.missing, []);
+  assert.ok(EXECUTABLES.includes(check.executable));
+});
+
+test('and is still accepted at the depth the SDK actually walks', { skip: !HAS_GAME }, () => {
+  // `stagedInstall()` caps its walk at the longest required path. That is only
+  // sound if the cap can still see everything the check asks for.
+  const deepest = Math.max(...REQUIRED_ENTRIES.map((entry) => entry.split('/').length));
+  const capped = walkGame(GAME_DIR).filter((path) => path.split('/').length <= deepest);
+
+  assert.equal(inspectInstall(capped).ok, true);
+});
+
+test('a nested install needs the walk the SDK gives the player folder', () => {
+  // Why `stageGame` does *not* cap the walk over the directory the player
+  // picked: they are allowed to hand over a parent, and that pushes the
+  // deepest required entry past any fixed ceiling. Real listing, moved down one.
+  const nested = installListing('Celeste/');
+  const deepest = Math.max(...REQUIRED_ENTRIES.map((entry) => entry.split('/').length));
+
+  assert.equal(inspectInstall(nested).ok, true);
+  assert.equal(
+    inspectInstall(nested.filter((path) => path.split('/').length <= deepest)).ok,
+    false,
+  );
 });

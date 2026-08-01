@@ -26,6 +26,8 @@ declare global {
       gameDirectory(): FileSystemDirectoryHandle | null;
       /** Ask for a folder. Returns the check, or null if the player cancelled. */
       pickGameDirectory(): Promise<InstallCheck | null>;
+      /** The install a previous session left in storage, if there is one. */
+      stagedInstall(): Promise<InstallCheck>;
       /** Run the same check over an archive, without unpacking it. */
       checkArchive(bytes: ArrayBuffer | Uint8Array | Blob): Promise<InstallCheck>;
       /** Whether this browser can hand over a directory at all. */
@@ -52,8 +54,15 @@ async function listDirectory(handle: FileSystemDirectoryHandle): Promise<string[
     for await (const [name, entry] of entries) {
       const path = prefix ? `${prefix}/${name}` : name;
       paths.push(path);
-      // Content/ alone is tens of thousands of files. The check only looks at
-      // the top of the tree, so there is no reason to walk the whole atlas.
+      // The check only looks at the top of the tree, so there is no reason to
+      // walk the whole of Content/ — most of a Celeste install's ~1,200 files
+      // are portrait frames nothing here asks about.
+      //
+      // The ceiling this puts on nesting is real, though: a player who hands
+      // over the *parent* of their install puts `Master Bank.bank` at 5
+      // segments, past this, and the check will not find it. The SDK's own
+      // walk is deliberately uncapped for that reason; this one is the demo
+      // being cheap before anything has been staged.
       if (entry.kind === 'directory' && path.split('/').length < 4) {
         await walk(entry as FileSystemDirectoryHandle, path);
       }
@@ -71,6 +80,8 @@ window.CELESTE = {
   canPickDirectory: typeof showDirectoryPicker === 'function',
 
   gameDirectory: () => picked,
+
+  stagedInstall: () => sdk.stagedInstall(),
 
   async pickGameDirectory(): Promise<InstallCheck | null> {
     if (!showDirectoryPicker) {
