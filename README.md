@@ -450,6 +450,16 @@ modifications the SDK is written against — the transferred canvas, the proxied
 runtime without them fails in ways that look like SDK bugs, so it fails at build
 time instead.
 
+That script also applies one modification of its own, which upstream does not
+make: it routes SDL's three emscripten joystick helpers away from
+`navigator.getGamepads()`. They are `EM_JS`, so they run on the thread that
+called them — the worker FNA's loop lives on, where the Gamepad API does not
+exist — and they threw inside SDL's `gamepadconnected` handler before it could
+add the pad, so no controller ever reached the game. Every other gamepad call in
+the driver is already proxied to the main thread, and the pad's `id` is a field
+of the event those calls fill in, so off the window the helpers read it back out
+of that instead.
+
 ### dist/ layout
 
 ```
