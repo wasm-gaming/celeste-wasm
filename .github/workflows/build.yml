@@ -1,0 +1,197 @@
+name: Build
+
+on:
+  push:
+    branches:
+      - main
+    tags:
+      - 'v*'
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+env:
+  # Keep in sync with the Makefile; used for the cache keys.
+  EVEREST_REF: a756f4710f81dd30e41469a950fd245451dd55d9
+  RUNTIME_REF: latest
+
+jobs:
+  sdk:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+      - name: Install dependencies
+        run: npm ci
+      - name: Build SDK (TypeScript + manifest + demo shell)
+        run: make build-sdk
+      - name: Test
+        run: make test
+      - uses: actions/upload-artifact@v4
+        with:
+          name: sdk-dist
+          path: dist/
+
+  everest:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - uses: actions/setup-dotnet@v4
+        with:
+          # net9.0 to build with, net8.0 to target — the same split the upstream
+          # pipeline uses.
+          dotnet-version: |
+            9.0.x
+            8.0.x
+
+      # MonoMod's IL projects assemble through Microsoft.Net.Sdk.IL, which
+      # shells out to ilasm; on Linux that comes from mono.
+      - name: Install mono
+        run: sudo apt-get update && sudo apt-get install -y mono-devel
+
+      - name: Cache the upstream checkout
+        uses: actions/cache@v4
+        with:
+          path: .tmp/everest-src
+          key: everest-src-${{ env.EVEREST_REF }}
+
+      - name: Build Everest
+        run: make build-everest
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: everest-dist
+          path: dist/celeste/everest.*
+
+  runtime:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+
+      # The bundle is ~43 MB compressed and ~250 MB unpacked; downloading it
+      # once per pinned release is the difference between a 1-minute job and a
+      # 5-minute one.
+      - name: Cache the runtime bundle
+        uses: actions/cache@v4
+        with:
+          path: .tmp/runtime
+          key: celeste-runtime-${{ env.RUNTIME_REF }}
+
+      - name: Install the runtime
+        run: make build-runtime
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: runtime-dist
+          path: |
+            dist/celeste/_framework/
+            dist/celeste/runtime.json
+
+  release:
+    needs: [sdk, everest, runtime]
+    if: startsWith(github.ref, 'refs/tags/')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: sdk-dist
+          path: dist
+      - uses: actions/download-artifact@v4
+        with:
+          name: everest-dist
+          path: dist/celeste
+      - uses: actions/download-artifact@v4
+        with:
+          name: runtime-dist
+          path: dist
+
+      # The runtime is a quarter of a gigabyte and carries several third-party
+      # licences (see NOTICE.md), so it belongs on a Release rather than in an
+      # npm tarball. Hosts point `options.runtimeBaseUrl` at it.
+      - name: Pack the runtime
+        run: |
+          tar -C dist/celeste -caf celeste-runtime.tar.zst _framework runtime.json
+          ls -la celeste-runtime.tar.zst
+
+      - name: Attach artifacts to Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            celeste-runtime.tar.zst
+            dist/celeste/everest.zip
+            dist/celeste/everest.json
+            dist/celeste/celeste.sdk.js
+            dist/celeste/celeste.sdk.d.ts
+            dist/celeste/celeste.manifest.js
+            dist/celeste/celeste.manifest.d.ts
+            dist/celeste/celeste.options.js
+            dist/celeste/celeste.options.d.ts
+            dist/celeste/celeste.install.js
+            dist/celeste/celeste.install.d.ts
+            dist/celeste/celeste.opfs.js
+            dist/celeste/celeste.opfs.d.ts
+            dist/celeste/celeste.runtime.js
+            dist/celeste/celeste.runtime.d.ts
+            dist/celeste/celeste.xxh64.js
+            dist/celeste/celeste.xxh64.d.ts
+            dist/celeste/celeste.zip.js
+            dist/celeste/celeste.zip.d.ts
+            dist/manifest.json
+            dist/index.html
+            dist/demo.js
+            NOTICE.md
+
+  pages:
+    needs: [sdk, everest, runtime]
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deploy.outputs.page_url }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: sdk-dist
+          path: dist
+      - uses: actions/download-artifact@v4
+        with:
+          name: everest-dist
+          path: dist/celeste
+      - uses: actions/download-artifact@v4
+        with:
+          name: runtime-dist
+          path: dist
+      - uses: actions/configure-pages@v5
+        with:
+          enablement: true
+      # Pages cannot send COOP/COEP, and the runtime needs them. dist/coi.js
+      # installs a service worker that adds both from inside the browser, which
+      # is why the demo shell loads it before anything else.
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: dist
+      - id: deploy
+        uses: actions/deploy-pages@v4

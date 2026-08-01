@@ -1,0 +1,21 @@
+# Dependencies
+node_modules/
+
+# Cache
+__pycache__/
+
+# Build workspace + output
+.tmp/
+dist/
+*.tsbuildinfo
+
+# Celeste itself is user-provided and must never be committed. The player
+# supplies their own copy of the game at runtime; nothing here ships it.
+Celeste.exe
+Celeste.dll
+Content/
+*.celeste
+
+# OS / editor
+.DS_Store
+.vscode/

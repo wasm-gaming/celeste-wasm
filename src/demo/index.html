@@ -1,0 +1,180 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=0" />
+  <title>Celeste + Everest — WebAssembly SDK demo</title>
+  <link rel="stylesheet" href="./demo/demo.css" />
+  <link rel="stylesheet" href="./theme.celeste.css" />
+  <!-- Adds COOP/COEP through a service worker on hosts that will not send them
+       (GitHub Pages, most static CDNs). No-op when they already arrive. -->
+  <script src="./coi.js"></script>
+  <script type="importmap">
+    {
+      "imports": {
+        "@wasm-gaming/celeste-wasm": "./celeste/celeste.sdk.js",
+        "@wasm-gaming/celeste-wasm/install": "./celeste/celeste.install.js",
+        "@wasm-gaming/celeste-wasm/zip": "./celeste/celeste.zip.js"
+      }
+    }
+  </script>
+</head>
+<body>
+  <header class="summit-bar">
+    <span class="wordmark">CELESTE</span>
+    <span class="badge">EVEREST</span>
+    <button type="button" id="pick-folder" hidden>Use my Celeste folder…</button>
+    <span class="install-status" role="status"></span>
+    <span class="runtime-tag">page <b id="isolation">…</b></span>
+  </header>
+
+  <main></main>
+
+  <!-- Publishes window.CELESTE for the wiring below. Module scripts run in
+       document order, so this one has finished before the inline module. -->
+  <script type="module" src="./demo.js"></script>
+
+  <script type="module">
+    // Toggle fullscreen on Cmd+Enter (Mac) / Ctrl+Enter (other). Celeste's own
+    // fullscreen toggle is inside the game, and Escape belongs to it.
+    document.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) {
+        e.preventDefault()
+        const target = document.querySelector('main') || document.documentElement
+        if (!document.fullscreenElement) {
+          target.requestFullscreen?.().catch(() => {})
+        } else {
+          document.exitFullscreen?.().catch(() => {})
+        }
+      }
+    })
+
+    import demo from './demo/demo.js'
+
+    const { sdk, manifest, pickGameDirectory, gameDirectory, checkArchive, canPickDirectory } =
+      window.CELESTE
+
+    const statusEl = document.querySelector('.summit-bar .install-status')
+    const setStatus = (text, bad = false) => {
+      statusEl.textContent = text
+      statusEl.classList.toggle('bad', bad)
+    }
+
+    // Drawn where the game would have been, when it never gets that far.
+    const showOnStage = (stageEl, reason) => {
+      stageEl.replaceChildren(
+        Object.assign(document.createElement('p'), {
+          className: 'stage-message',
+          textContent: reason,
+        }),
+      )
+    }
+
+    // --- the folder route ---------------------------------------------------
+    //
+    // Preferred wherever it exists: no 1.3 GB archive for the player to build,
+    // and the SDK copies the install across file by file.
+    const pickButton = document.getElementById('pick-folder')
+    if (canPickDirectory) {
+      pickButton.hidden = false
+      pickButton.addEventListener('click', async () => {
+        setStatus('Reading folder…')
+        try {
+          const check = await pickGameDirectory()
+          if (!check) return setStatus('')
+          setStatus(
+            check.ok
+              ? `Celeste found${check.hasEverest ? ' (already Everest-patched)' : ''} — press Start.`
+              : check.reason,
+            !check.ok,
+          )
+        } catch (err) {
+          setStatus(err.message, true)
+        }
+      })
+    }
+
+    demo
+      .init({
+        manifest,
+        messages: {
+          title: 'Celeste + Everest',
+          dropRomPrompt: 'Drop a zip of your Celeste folder',
+          romAssetHint: 'no part of the game ships with this package',
+          launchButton: 'Start',
+          statusSelectRom: 'Ready — supply the copy of Celeste you own.',
+        },
+        bios: false,
+        // Escape is Celeste's pause key, and the game's own menu is the real
+        // one. A second overlay on the same key would only fight it.
+        escMenu: { enabled: false },
+      })
+      // Check the archive the moment it is picked, while the launcher is still
+      // on screen and nothing has been downloaded or unpacked yet.
+      .on('rom:save', async ({ file }) => {
+        if (!file) return
+        try {
+          const check = await checkArchive(file)
+          setStatus(check.ok ? 'Celeste found — press Start.' : check.reason, !check.ok)
+        } catch (err) {
+          setStatus(`That does not look like a zip: ${err.message}`, true)
+        }
+      })
+      .on('launch', async (e) => {
+        const directory = gameDirectory()
+
+        // The folder takes precedence: if the player picked one, the archive
+        // slot is irrelevant.
+        const assets = {}
+        if (!directory) {
+          const archive = await demo.loadToMEMFS('rom')
+          const check = await checkArchive(archive)
+          if (!check.ok) {
+            setStatus(check.reason, true)
+            showOnStage(e.attachTo, check.reason)
+            throw new Error(check.reason)
+          }
+          assets.game = archive
+        }
+
+        setStatus('Staging the game…')
+
+        const instance = await sdk.load({
+          attachTo: e.attachTo,
+          assets,
+          gameDirectory: directory ?? undefined,
+          options: {
+            installFileName: e.fileName,
+            // Already checked above; no need to walk the same listing twice.
+            verifyInstall: false,
+          },
+          onProgress(current, total) {
+            if (total > 0) {
+              setStatus(`Staging the game… ${Math.round((current / total) * 100)}%`)
+            }
+          },
+          onSplash(message) {
+            // Everest's own loading messages, forwarded from the mod loader.
+            if (message === null) setStatus('')
+            else if (message) setStatus(message)
+          },
+          onEvent(event) {
+            if (event.type === 'error') {
+              console.error(event.error)
+              setStatus(event.error.message, true)
+            } else {
+              console.log('[demo]', event.type)
+              if (event.type === 'ready') setStatus('')
+            }
+          },
+        })
+
+        instance.start()
+
+        // The first boot runs MonoMod over the whole game and takes minutes;
+        // the patched build is cached in storage from then on.
+        return instance
+      })
+  </script>
+</body>
+</html>

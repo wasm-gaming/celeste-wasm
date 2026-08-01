@@ -1,0 +1,20 @@
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "module": "NodeNext",
+    "moduleResolution": "NodeNext",
+    "lib": ["ES2022", "DOM", "DOM.Iterable"],
+    "outDir": "dist",
+    "rootDir": "src/demo",
+    "strict": true,
+    "skipLibCheck": true,
+    "verbatimModuleSyntax": true,
+    "baseUrl": ".",
+    "paths": {
+      "@wasm-gaming/celeste-wasm": ["./dist/celeste/celeste.sdk.d.ts"],
+      "@wasm-gaming/celeste-wasm/install": ["./dist/celeste/celeste.install.d.ts"],
+      "@wasm-gaming/celeste-wasm/zip": ["./dist/celeste/celeste.zip.d.ts"]
+    }
+  },
+  "include": ["src/demo/**/*.ts"]
+}

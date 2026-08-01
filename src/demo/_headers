@@ -1,0 +1,9 @@
+# Cross-origin isolation, for hosts that read this file (Cloudflare Pages,
+# Netlify). The runtime is built with threads and will not boot without it.
+#
+# Anywhere else, dist/coi.js installs a service worker that adds the same two
+# headers from inside the browser.
+/*
+	Cross-Origin-Embedder-Policy: require-corp
+	Cross-Origin-Opener-Policy: same-origin
+	Cross-Origin-Resource-Policy: cross-origin

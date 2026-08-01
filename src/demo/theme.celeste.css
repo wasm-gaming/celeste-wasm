@@ -1,0 +1,151 @@
+/* Celeste skin for the shared demo template.
+ *
+ * The template exposes its whole visual system as custom properties (see
+ * demo/README.md); this only overrides those, plus the small header this page
+ * adds on top. The palette is the mountain at night: indigo sky, snow, and the
+ * red of a strawberry for anything that wants attention.
+ */
+
+:root {
+  --celeste-night: #17153a;
+  --celeste-dusk: #2b2560;
+  --celeste-snow: #f4f7ff;
+  --celeste-mist: #a9b1d6;
+  --celeste-berry: #e0526a;
+  --celeste-berry-rgb: 224, 82, 106;
+  --celeste-dash: #62c8f0;
+  --celeste-dash-rgb: 98, 200, 240;
+
+  /* Template tokens */
+  --demo-bg-a: var(--celeste-dusk);
+  --demo-bg-b: var(--celeste-night);
+  --demo-text: var(--celeste-snow);
+  --demo-muted: var(--celeste-mist);
+
+  --demo-accent: var(--celeste-berry);
+  --demo-accent-rgb: var(--celeste-berry-rgb);
+  --demo-accent2: var(--celeste-dash);
+  --demo-accent2-rgb: var(--celeste-dash-rgb);
+
+  --demo-panel-bg: rgba(23, 21, 58, 0.72);
+  --demo-panel-border: rgba(244, 247, 255, 0.14);
+  --demo-panel-radius: 14px;
+  --demo-panel-blur: 20px;
+  --demo-subpanel-bg: rgba(43, 37, 96, 0.55);
+  --demo-subpanel-border: rgba(244, 247, 255, 0.1);
+  --demo-drop-bg: rgba(43, 37, 96, 0.45);
+  --demo-drop-active-bg: rgba(224, 82, 106, 0.22);
+  --demo-picker-bg: rgba(244, 247, 255, 0.12);
+  --demo-pill-bg: rgba(var(--celeste-berry-rgb), 0.16);
+  --demo-file-info-bg: rgba(23, 21, 58, 0.82);
+
+  --demo-esc-bg: rgba(10, 9, 26, 0.88);
+  --demo-esc-card-bg: rgba(23, 21, 58, 0.94);
+  --demo-esc-text: var(--celeste-snow);
+}
+
+body {
+  margin: 0;
+  min-height: 100vh;
+  color: var(--celeste-snow);
+  background:
+    radial-gradient(120% 90% at 50% 0%, rgba(98, 200, 240, 0.16), transparent 60%),
+    linear-gradient(180deg, var(--celeste-dusk), var(--celeste-night) 65%);
+  font-family: var(--demo-font-sans, system-ui, sans-serif);
+}
+
+/* --- the page's own header ------------------------------------------------ */
+
+.summit-bar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.75rem;
+  padding: 0.75rem 1.25rem;
+  border-bottom: 1px solid rgba(244, 247, 255, 0.12);
+  background: rgba(10, 9, 26, 0.55);
+  backdrop-filter: blur(12px);
+}
+
+.summit-bar .wordmark {
+  font-size: 1.1rem;
+  font-weight: 700;
+  letter-spacing: 0.32em;
+  color: var(--celeste-snow);
+}
+
+.summit-bar .badge {
+  padding: 0.15rem 0.55rem;
+  border-radius: 999px;
+  background: rgba(var(--celeste-berry-rgb), 0.18);
+  border: 1px solid rgba(var(--celeste-berry-rgb), 0.5);
+  color: var(--celeste-berry);
+  font-size: 0.7rem;
+  font-weight: 700;
+  letter-spacing: 0.18em;
+}
+
+.summit-bar button {
+  padding: 0.35rem 0.85rem;
+  border-radius: 8px;
+  border: 1px solid rgba(var(--celeste-dash-rgb), 0.55);
+  background: rgba(var(--celeste-dash-rgb), 0.14);
+  color: var(--celeste-snow);
+  font: inherit;
+  font-size: 0.85rem;
+  cursor: pointer;
+  transition: background 150ms, border-color 150ms;
+}
+
+.summit-bar button:hover {
+  background: rgba(var(--celeste-dash-rgb), 0.26);
+  border-color: var(--celeste-dash);
+}
+
+.summit-bar .install-status {
+  flex: 1 1 16rem;
+  min-width: 0;
+  color: var(--celeste-mist);
+  font-size: 0.85rem;
+}
+
+/* Anything the player has to act on — a wrong folder, a page that is not
+ * isolated — is the one thing on the bar that is not mist-coloured. */
+.summit-bar .install-status.bad,
+.summit-bar b.bad {
+  color: var(--celeste-berry);
+}
+
+.summit-bar .runtime-tag {
+  margin-left: auto;
+  color: var(--celeste-mist);
+  font-family: var(--demo-font-mono, monospace);
+  font-size: 0.75rem;
+}
+
+.summit-bar .runtime-tag b {
+  color: var(--celeste-dash);
+  font-weight: 600;
+}
+
+/* --- the stage ------------------------------------------------------------ */
+
+main {
+  display: block;
+  width: 100%;
+  /* The canvas is absolutely positioned inside whatever the template mounts,
+   * so the stage has to carry the height itself. */
+  height: calc(100vh - 3.5rem);
+}
+
+.stage-message {
+  display: grid;
+  place-content: center;
+  height: 100%;
+  margin: 0;
+  padding: 2rem;
+  text-align: center;
+  color: var(--celeste-berry);
+  font-size: 1rem;
+  line-height: 1.6;
+}

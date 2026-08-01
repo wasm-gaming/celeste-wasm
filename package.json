@@ -1,0 +1,69 @@
+{
+  "name": "@wasm-gaming/celeste-wasm",
+  "version": "0.1.0",
+  "description": "Celeste + the Everest mod loader running on the .NET WebAssembly runtime, with a JS SDK conforming to the wasm-gaming engine contract.",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/wasm-gaming/celeste-wasm.git"
+  },
+  "bugs": {
+    "url": "https://github.com/wasm-gaming/celeste-wasm/issues"
+  },
+  "homepage": "https://github.com/wasm-gaming/celeste-wasm#readme",
+  "type": "module",
+  "main": "./dist/celeste/celeste.sdk.js",
+  "types": "./dist/celeste/celeste.sdk.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/celeste/celeste.sdk.d.ts",
+      "import": "./dist/celeste/celeste.sdk.js"
+    },
+    "./options": {
+      "types": "./dist/celeste/celeste.options.d.ts",
+      "import": "./dist/celeste/celeste.options.js"
+    },
+    "./install": {
+      "types": "./dist/celeste/celeste.install.d.ts",
+      "import": "./dist/celeste/celeste.install.js"
+    },
+    "./zip": {
+      "types": "./dist/celeste/celeste.zip.d.ts",
+      "import": "./dist/celeste/celeste.zip.js"
+    },
+    "./manifest": "./dist/manifest.json"
+  },
+  "comment:files": "Only the SDK ships on npm. The .NET WebAssembly runtime (dist/celeste/_framework, ~250 MB unpacked) and the Everest build are published as GitHub Release assets and pointed at with `runtimeBaseUrl`.",
+  "files": [
+    "dist/celeste/*.js",
+    "dist/celeste/*.d.ts",
+    "dist/celeste/*.map",
+    "dist/manifest.json",
+    "src/celeste.install.ts",
+    "src/celeste.manifest.ts",
+    "src/celeste.opfs.ts",
+    "src/celeste.options.ts",
+    "src/celeste.runtime.ts",
+    "src/celeste.sdk.ts",
+    "src/celeste.xxh64.ts",
+    "src/celeste.zip.ts",
+    "README.md",
+    "NOTICE.md",
+    "LICENSE"
+  ],
+  "comment:scripts": "Build logic lives in the Makefile, not here (make build / build-sdk / build-wasm / preview).",
+  "scripts": {},
+  "peerDependencies": {
+    "@wasm-gaming/engine-specs": ">=0.2.0"
+  },
+  "peerDependenciesMeta": {
+    "@wasm-gaming/engine-specs": {
+      "optional": true
+    }
+  },
+  "devDependencies": {
+    "@wasm-gaming/engine-specs": "^0.2.6",
+    "typescript": "^5.5.0"
+  },
+  "engineContract": "https://github.com/wasm-gaming/engine-specs",
+  "license": "MIT"
+}
