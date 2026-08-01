@@ -170,6 +170,49 @@ function SDL_GetEmscriptenGamepad(device_index) {
   });
 };
 
+/**
+ * Tell the page when the game's main loop stops.
+ *
+ * FNA does not return from `Game.Run()` on this platform. `RunLoop()` sees
+ * `NeedsPlatformMainLoop()` and hands control to `emscripten_set_main_loop(cb,
+ * 0, 1)`, whose third argument makes the glue `throw "unwind"` — the C stack is
+ * discarded on the way in and nothing after that call ever runs. So
+ * `CelesteLoader.MainLoop()`, which the SDK awaits for exactly this, is a
+ * promise that never settles: quitting the game leaves the last (black) frame
+ * on the canvas, FMOD still playing on its own thread, and the host with no way
+ * to know the game is gone. Upstream's frontend awaits the same promise and has
+ * the same hole.
+ *
+ * What does happen on quit is `emscripten_cancel_main_loop()`, from FNA's own
+ * emscripten iteration callback the moment `RunApplication` goes false. That is
+ * the signal, and this puts it on a channel the page can hear.
+ *
+ * A BroadcastChannel rather than anything of emscripten's own: this runs on the
+ * deputy worker the loop lives on, which shares no scope with the page, and the
+ * proxying the glue does have is for C functions registered at link time.
+ * `EXIT_CHANNEL` in celeste.sdk.ts is the other end.
+ */
+const patchExitSignal = (name) => {
+  patch(name, {
+    probe: /celesteAnnounceMainLoopStopped/,
+    from: /var _emscripten_cancel_main_loop = \(\) => \{\n Browser\.mainLoop\.pause\(\);\n Browser\.mainLoop\.func = null;\n\};/,
+    to: `function celesteAnnounceMainLoopStopped() {
+ try {
+  var channel = new BroadcastChannel("celeste-wasm:runtime");
+  channel.postMessage({ type: "mainloop-stopped" });
+  channel.close();
+ } catch (e) {}
+}
+
+var _emscripten_cancel_main_loop = () => {
+ Browser.mainLoop.pause();
+ Browser.mainLoop.func = null;
+ celesteAnnounceMainLoopStopped();
+};`,
+    why: 'the main-loop-stopped signal the SDK turns into an exit event',
+  });
+};
+
 for (const name of nativeGlue) {
   // The canvas is transferred to the worker the renderer runs on, selected by
   // CSS class. `CANVAS_CLASS` in celeste.sdk.ts is the other half of this.
@@ -190,6 +233,7 @@ for (const name of nativeGlue) {
   });
 
   patchGamepadHelpers(name);
+  patchExitSignal(name);
 }
 
 for (const name of runtimeGlue) {

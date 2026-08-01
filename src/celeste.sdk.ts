@@ -67,6 +67,26 @@ const CANVAS_CLASS = 'canvas';
  */
 const CANVAS_ID = 'canvas';
 
+/**
+ * Where the runtime says the game's loop has stopped.
+ *
+ * `CelesteLoader.MainLoop()` is a promise that never settles: FNA hands the
+ * loop to `emscripten_set_main_loop(cb, 0, 1)`, which unwinds the stack on the
+ * way in, so nothing after `Game.Run()` is ever reached — not the task's
+ * completion and not `Cleanup()`. What the game does do on its way out is
+ * `emscripten_cancel_main_loop()`, and `scripts/verify-runtime.mjs` patches the
+ * glue to announce that here. The loop runs on the deputy worker, which shares
+ * no scope with the page, hence a channel rather than a callback.
+ *
+ * A BroadcastChannel carries no addressing, so a second tab running Celeste on
+ * this origin would hear it too. That is not a state this package supports in
+ * the first place — the staged install is one set of exclusive OPFS handles —
+ * and what the collision costs is an exit event arriving early, not a wrong one.
+ * SDL_Quit() reaches the same glue from `Cleanup()`, one line further down the
+ * exit path; `exited` is what keeps that from being a second event.
+ */
+const EXIT_CHANNEL = 'celeste-wasm:runtime';
+
 export type CelesteInstance = EngineInstance & {
   /** What the acceptance check made of the install that booted. */
   readonly install: InstallCheck;
@@ -815,6 +835,8 @@ export async function load(config: CelesteLoadConfig): Promise<CelesteInstance> 
   let destroyed = false;
   let memoryMB = -1;
   let stopWatchingMemory: (() => void) | null = null;
+  let exitChannel: BroadcastChannel | null = null;
+  let exited = false;
 
   const suspendables: AudioContext[] = [];
   const trackAudio = opts.suspendAudioWhenHidden ? watchAudioContexts(suspendables) : null;
@@ -872,15 +894,46 @@ export async function load(config: CelesteLoadConfig): Promise<CelesteInstance> 
     if (opts.lockKeyboard) void lockKeyboard();
     emit({ type: 'ready' });
 
-    // MainLoop only resolves when the game exits, so it is deliberately not
-    // awaited by load().
+    /**
+     * The game has stopped ticking, from whichever half noticed first.
+     *
+     * The event goes out before the teardown rather than after it. `Cleanup()`
+     * joins Celeste's own threads (`RunThread.WaitAll()`) before it unloads the
+     * audio and disposes the game, and a thread that never comes back would
+     * hold the exit event forever — which is a host left showing a black
+     * canvas, the exact failure this is here to end. So tell the host, then
+     * tidy up on whatever time is left: a host that reloads on `exit` (the
+     * runtime cannot be started twice in one page, so most will) takes the
+     * audio down with the page anyway, and one that stays gets it unloaded
+     * here.
+     */
+    const stopped = (): void => {
+      if (exited || destroyed) return;
+      exited = true;
+      booted = false;
+      stopWatchingMemory?.();
+      emit({ type: 'exit' });
+      try {
+        void exports?.CelesteLoader.Cleanup().catch(() => {});
+      } catch {
+        // The runtime is on its way down; a teardown that will not start is
+        // not something the host can act on.
+      }
+    };
+
+    // The signal that actually arrives — see EXIT_CHANNEL.
+    if (typeof BroadcastChannel !== 'undefined') {
+      exitChannel = new BroadcastChannel(EXIT_CHANNEL);
+      exitChannel.onmessage = (event: MessageEvent<{ type?: string }>): void => {
+        if (event.data?.type === 'mainloop-stopped') stopped();
+      };
+    }
+
+    // …and the one the loader's signature promises, kept for the runtime that
+    // one day returns from `Game.Run()` normally. It is deliberately not
+    // awaited by load(): it resolves only once the game is over.
     void exports.CelesteLoader.MainLoop()
-      .then(async () => {
-        stopWatchingMemory?.();
-        await exports?.CelesteLoader.Cleanup();
-        booted = false;
-        emit({ type: 'exit' });
-      })
+      .then(stopped)
       .catch((err: unknown) => {
         emit({ type: 'error', error: err instanceof Error ? err : new Error(String(err)) });
       });
@@ -950,6 +1003,8 @@ export async function load(config: CelesteLoadConfig): Promise<CelesteInstance> 
       destroyed = true;
       pageInstance = null;
       stopWatchingMemory?.();
+      exitChannel?.close();
+      exitChannel = null;
       trackAudio?.();
       canvas.removeEventListener('contextmenu', swallowContextMenu);
       canvas.removeEventListener('pointerdown', onPointerDown);

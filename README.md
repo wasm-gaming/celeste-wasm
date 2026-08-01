@@ -450,8 +450,23 @@ modifications the SDK is written against — the transferred canvas, the proxied
 runtime without them fails in ways that look like SDK bugs, so it fails at build
 time instead.
 
-That script also applies one modification of its own, which upstream does not
-make: it routes SDL's three emscripten joystick helpers away from
+That script also applies two modifications of its own, which upstream does not
+make.
+
+The first is how the SDK knows the game has quit. FNA never returns from
+`Game.Run()` here: on Emscripten it hands the loop to
+`emscripten_set_main_loop(cb, 0, 1)`, and that third argument makes the glue
+`throw "unwind"` and discard the C stack, so nothing after that call runs —
+including the completion of `CelesteLoader.MainLoop()`, the promise upstream's
+frontend and this SDK both await to learn that the game is over. Quitting
+therefore left the last (black) frame on the canvas with the music still
+playing and the page none the wiser. What the game *does* do on the way out is
+call `emscripten_cancel_main_loop()`, so that is wrapped to announce itself on a
+`BroadcastChannel` — the loop runs on the deputy worker, which shares no scope
+with the page — and the SDK turns the announcement into the contract's `exit`
+event.
+
+The second routes SDL's three emscripten joystick helpers away from
 `navigator.getGamepads()`. They are `EM_JS`, so they run on the thread that
 called them — the worker FNA's loop lives on, where the Gamepad API does not
 exist — and they threw inside SDL's `gamepadconnected` handler before it could

@@ -215,9 +215,24 @@
               setStatus('')
               hud.close()
             }
+            // The game's own Quit. Nothing in this page can start it again —
+            // the .NET runtime cannot be torn down by the page that started it,
+            // and the canvas went to a worker the moment the runtime came up —
+            // so the way back to the launcher is a fresh page. The staged
+            // install stays in OPFS, so the reload lands on the storage route
+            // below with Start live again, which is the view the player left.
             if (event.type === 'exit') {
               mainEl.classList.remove('running')
-              showOnStage(stageEl, 'Celeste exited. Reload the page to play again.')
+              showOnStage(stageEl, 'Celeste exited — back to the launcher…')
+              if (document.fullscreenElement) document.exitFullscreen?.().catch(() => {})
+              // Twice, because once would not do it: a rAF callback runs
+              // *before* the paint it was scheduled for, so reloading from the
+              // first one pre-empts the very frame the message was written
+              // for. The second callback is the first one that runs after it
+              // is on screen — which matters because the browser keeps showing
+              // this document until the new one is ready to paint, and on a
+              // cold cache that is long enough to look like nothing happened.
+              requestAnimationFrame(() => requestAnimationFrame(() => location.reload()))
             }
           },
         })
