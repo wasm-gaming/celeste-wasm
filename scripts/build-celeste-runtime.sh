@@ -10,10 +10,16 @@ set -euo pipefail
 # template — a toolchain artifact, pinned by revision, not something this repo
 # reimplements.
 #
-# Building it from source needs a patched emsdk, a patched .NET runtime pack and
-# roughly an hour of CPU, so by default the pinned prebuilt bundle is
-# downloaded. Set RUNTIME_SOURCE=1 to build it instead; the requirements are in
-# the upstream README.
+# By default the pinned prebuilt bundle is downloaded, which is what almost
+# everyone wants. RUNTIME_SOURCE=1 builds it instead.
+#
+# That source build is less exotic than its reputation: emsdk and the .NET
+# runtime pack are not compiled here, they are downloaded already patched from
+# an FNA-WASM-Build release into the checkout's `statics/`, and the loader's
+# csproj points `EmsdkRoot` at that directory. What it does need is dotnet 10
+# (the loader targets net10.0), the wasm-tools workload, pnpm and mono — which
+# is what `make build-runtime-docker` supplies. Running it on the host means
+# installing all four.
 #
 # Env knobs (all optional):
 #   RUNTIME_REPO     Loader repository

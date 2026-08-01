@@ -1,0 +1,107 @@
+name: Runtime (from source)
+
+# Builds the .NET WebAssembly runtime from the loader repository instead of
+# downloading the pinned prebuilt bundle.
+#
+# Manual only. It is the long build — it clones FNA, MonoMod, NLua and
+# SteamKit2.WASM, downloads a ~700 MB emsdk and a runtime pack, then AOT
+# compiles and links a ~100 MB wasm binary — and nothing in the normal build
+# needs it. `Build` fetches the pinned bundle, which is what CI wants.
+#
+# Reach for this when you are changing the loader itself. The game's paths in
+# storage are string literals inside CelesteLoader.dll (`/libsdl/Celeste.exe`,
+# `/libsdl/Content`, …), so moving them — to namespace this engine's OPFS
+# entries, say — means rebuilding it, and swapping a recompiled assembly into
+# the prebuilt bundle is not an alternative: the boot manifest inside dotnet.js
+# names it by content hash, and the same assembly is AOT compiled into the
+# native binary.
+#
+# Point `repository` at a fork to build your own.
+#
+# Why here rather than `make build-runtime-docker`: the runner is already a
+# Linux x86-64 machine, so there is nothing to containerise, and this build in
+# particular *needs* x86-64. Upstream's emsdk is a prebuilt x86-64 toolchain,
+# which on an Apple Silicon host forces amd64 emulation — and mono's JIT does
+# not survive that emulation. Here all of it runs natively.
+
+on:
+  workflow_dispatch:
+    inputs:
+      repository:
+        description: 'Loader repository to build'
+        default: 'https://github.com/MercuryWorkshop/celeste-wasm'
+      revision:
+        description: 'Commit to build (blank = the repository default branch)'
+        default: '70ab8ae24e0ea9f06bc9c9248278038a89cd2a59'
+
+permissions:
+  contents: read
+
+jobs:
+  runtime:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+
+    env:
+      RUNTIME_SOURCE: '1'
+      RUNTIME_REPO: ${{ inputs.repository }}
+      RUNTIME_REV: ${{ inputs.revision }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+
+      # The frontend is a Vite app and `make publish` runs `pnpm build`.
+      - name: Install pnpm
+        run: npm install -g pnpm@10
+
+      - uses: actions/setup-dotnet@v4
+        with:
+          # The loader targets net10.0. Upstream's README still says 9.0.4;
+          # that is stale against the pinned revision's csproj.
+          dotnet-version: '10.0.x'
+
+      # NLua strong-names its assembly with mono's `sn`, and MonoMod's IL
+      # projects assemble through Microsoft.Net.Sdk.IL, which shells out to
+      # ilasm. Both come from mono.
+      - name: Install mono
+        run: sudo apt-get update && sudo apt-get install -y mono-devel
+
+      # ~700 MB of emsdk and runtime pack, pinned to the release the loader's
+      # Makefile names. Worth caching: it is most of the wall time on a build
+      # that otherwise only recompiles C#.
+      - name: Cache the downloaded toolchains
+        uses: actions/cache@v4
+        with:
+          path: .tmp/celeste-loader-src/statics
+          key: loader-statics-${{ inputs.revision || 'head' }}
+
+      - name: Cache NuGet
+        uses: actions/cache@v4
+        with:
+          path: .tmp/nuget
+          key: loader-nuget-${{ inputs.revision || 'head' }}
+          restore-keys: loader-nuget-
+
+      - name: Build the runtime from source
+        run: make build-runtime
+
+      # verify-runtime.mjs has already asserted the four modifications the SDK
+      # is written against; this is the provenance record beside them.
+      - name: Report what was built
+        run: |
+          cat dist/celeste/runtime.json
+          du -sh dist/celeste/_framework
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: runtime-from-source
+          path: |
+            dist/celeste/_framework/
+            dist/celeste/runtime.json
+          # A quarter of a gigabyte per run, and this is a debugging aid rather
+          # than something to keep.
+          retention-days: 7

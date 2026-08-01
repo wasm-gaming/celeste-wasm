@@ -121,7 +121,7 @@ What lands there falls into two groups.
 | `MMHOOK_Celeste.dll` | MonoMod's hook assembly |
 | `Celeste.Mod.mm.dll` | Everest's loader assembly |
 | `everest.zip` | the Everest build, before it is unpacked |
-| `Celeste/` | `Everest/`, `Mods/` and `Saves/` under one directory |
+| `Celeste/` | `Everest/`, `Mods/`, `Saves/` and `staged.json` under one directory |
 
 **The player's install, and an open one.** Everything else in the folder they
 hand over is copied to the root as-is. A vanilla macOS install is 25 top-level
@@ -137,12 +137,16 @@ Two consequences worth planning around:
   Not because the names above are likely to collide — because the open set makes
   "avoid Celeste's names" unverifiable. A prefix like `snes/` is fine; a bare
   `Content/` or `System.dll` is not.
-- **`purgeStorage()` cannot empty the root, and does not try.** It removes the
-  closed set in the table plus the save directory. The player's stray assemblies
-  — a few tens of MB — stay behind, because the only way to catch them would be
-  deleting every entry at the root, which would take a sibling engine's data with
-  it. Emptying the whole origin is `navigator.storage`'s job, not this
-  package's, and it is the host that knows whether that is safe.
+- **`purgeStorage()` removes the open set too, without emptying the root.**
+  Staging records the top-level names it created in `Celeste/staged.json`, so a
+  purge can drop the player's `FNA.dll` and `mscorlib.dll` — which no fixed list
+  here could have named — and still leave a sibling engine's directory
+  untouched. Mods are kept: they are the player's, they are not part of the
+  install, and nothing regenerates them.
+
+  Storage staged before this package kept that record has no manifest and falls
+  back to the fixed list, leaving the stray assemblies behind as it always did.
+  Re-staging writes a manifest and the next purge is complete.
 
 Real isolation means moving those literals, which means rebuilding the managed
 loader — out of scope for this package, and tracked upstream.
@@ -300,7 +304,7 @@ Where the contract and a full desktop game do not line up exactly:
 | `pause()` / `resume()` | No-ops with a warning. FNA drives its own loop on the render worker and exposes no handle on it; Escape opens Celeste's pause menu, which is the real pause. |
 | `reset()` | **Throws.** There is one .NET runtime per page and the canvas has already been transferred to a worker, so a power cycle means a reload. The contract allows this, and a silent no-op would be worse. |
 | `setInput()` | No-op with a warning. The game ships a key-mapping screen and Everest adds its own. |
-| `purgeStorage()` | Drops the staged install, the patched assemblies and the Everest build (`data`), and Celeste's save directory (`settings`). It does **not** empty the OPFS root — the player's own assemblies stay behind; see [What Celeste occupies in OPFS](#what-celeste-occupies-in-opfs). The loader mounts one OPFS root per origin, so this ignores `storageNamespace`. |
+| `purgeStorage()` | Drops the staged install, the patched assemblies and the Everest build (`data`), and Celeste's save directory (`settings`). Mods are kept. Removes what staging recorded rather than emptying the root, so a sibling engine on the same origin survives — see [What Celeste occupies in OPFS](#what-celeste-occupies-in-opfs). Also exported standalone, for hosts that want it before `load()`. The loader mounts one OPFS root per origin, so this ignores `storageNamespace`. |
 | `saveState()` / `loadState()` | Not implemented; `capabilities.saveStates` is `false`. Celeste has its own save files. |
 | `load()` twice | Throws. The canvas cannot be transferred twice and the runtime cannot be unloaded. |
 
@@ -347,6 +351,66 @@ make build-wasm     # runtime + Everest, on the host
 make build-runtime  # install the .NET WASM runtime → dist/celeste/_framework/
 make build-everest  # compile the pinned Everest → dist/celeste/everest.zip
 ```
+
+### Building the runtime from source
+
+`make build-runtime` downloads the pinned prebuilt bundle. To build it instead:
+
+```bash
+make build-runtime-docker
+```
+
+You want this when you are **changing the loader**. The game's paths in storage
+are string literals inside `CelesteLoader.dll` — `/libsdl/Celeste.exe`,
+`/libsdl/Content` and the rest — so moving them, to namespace this engine's OPFS
+entries for instance, means rebuilding it.
+
+Swapping a recompiled assembly into the prebuilt bundle is not a shortcut: the
+boot manifest inside `dotnet.js` names it by content hash, and the same assembly
+is AOT compiled into the native binary (`<RunAOTCompilation>true`). From source,
+the assembly, its AOT code and the manifest are regenerated together and neither
+problem exists.
+
+It gets its own container rather than sharing the Everest one. Everest targets
+net8.0 and needs mono's `ilasm`; the loader targets **net10.0** and links through
+Emscripten. Keeping them apart means neither toolchain can move under the other.
+Note that upstream's README asks for .NET 9.0.4 — that is stale against the
+pinned revision, whose `loader.csproj` says `net10.0`.
+
+Less exotic than its reputation, incidentally: emsdk and the .NET runtime pack
+are not compiled: upstream downloads both, already patched, from an
+[FNA-WASM-Build](https://github.com/r58Playz/FNA-WASM-Build) release into
+`statics/`, and the loader's csproj points `EmsdkRoot` there. The container just
+supplies dotnet 10, the `wasm-tools` workload, pnpm and mono.
+
+The first run is long — it clones FNA, MonoMod, NLua and SteamKit2.WASM,
+downloads a runtime pack and an emsdk, then AOT compiles and links a ~100 MB
+wasm binary. All of it caches under `.tmp/`, so later runs reuse it. Point it at
+a fork with `RUNTIME_REPO` / `RUNTIME_REV`.
+
+**On Apple Silicon it runs emulated**, and the image carries two workarounds for
+that. Both are recorded here because each one failed hundreds of lines into an
+otherwise healthy build:
+
+- The emsdk in `statics/emsdk.zip` is a prebuilt x86-64 toolchain with no arm64
+  build in the release, so an arm64 container dies invoking its clang
+  (`rosetta error: failed to open elf at /lib64/ld-linux-x86-64.so.2`). The
+  platform is pinned to `linux/amd64`.
+- Under that emulation mono's JIT asserts — it assumes JIT-emitted code sits
+  within a 32-bit displacement of the runtime, and the emulated address space
+  does not oblige — surfacing as `sn` exiting 134 while NLua is strong-named.
+  `sn` and `ilasm` are wrapped to run through mono's interpreter. **Scoped to
+  those two**: `MONO_ENV_OPTIONS` is read by *every* mono runtime including the
+  AOT cross-compiler, which aborts on `--interp` and fails identically, later.
+
+Measured at **31 minutes** on an M-series Mac with the toolchains already
+cached. Native x86-64 is considerably faster.
+
+**Or skip the local build entirely.** `.github/workflows/runtime-source.yml`
+runs it on `ubuntu-latest`, which is native x86-64 — no emulation and none of
+the above. `workflow_dispatch` only; it takes `repository` and `revision` inputs
+so you can point it at a fork, and uploads `_framework/` as an artifact with a
+week's retention.
 
 ### Testing against a real install
 

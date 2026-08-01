@@ -25,6 +25,7 @@ import {
   readFile,
   removePath,
   SAVES_DIR,
+  STAGED_MANIFEST,
   VFS_ROOT,
   writeFile,
   type StageProgress,
@@ -244,6 +245,84 @@ export async function importSaves(
   return restored;
 }
 
+// --------------------------------------------------------------- the manifest
+
+/** Top-level names present in storage right now. */
+async function rootEntries(root: FileSystemDirectoryHandle): Promise<string[]> {
+  return listPaths(root, '', { depth: 1 });
+}
+
+/** The names this package has claimed at the root, or null if it never recorded any. */
+async function readStaged(root: FileSystemDirectoryHandle): Promise<string[] | null> {
+  const raw = await readFile(root, STAGED_MANIFEST);
+  if (!raw) return null;
+  try {
+    const parsed = JSON.parse(new TextDecoder().decode(raw)) as { entries?: unknown };
+    return Array.isArray(parsed.entries) ? parsed.entries.filter((e) => typeof e === 'string') : null;
+  } catch {
+    // A manifest we cannot read is the same as not having one: fall back to the
+    // fixed list rather than deleting on a guess.
+    return null;
+  }
+}
+
+/**
+ * Record the root entries staging just created.
+ *
+ * `before` is the listing from before it ran, so what goes in the manifest is
+ * the difference — the names this package is responsible for, and not whatever
+ * a sibling engine on the same origin had already put there. Unioned with any
+ * previous record, because a second staging adds to storage rather than
+ * replacing it.
+ */
+async function recordStaged(root: FileSystemDirectoryHandle, before: string[]): Promise<void> {
+  const added = (await rootEntries(root)).filter((name) => !before.includes(name));
+  const known = (await readStaged(root)) ?? [];
+  const entries = [...new Set([...known, ...added])].sort();
+
+  if (entries.length === known.length && entries.every((name, at) => name === known[at])) return;
+
+  await writeFile(
+    root,
+    STAGED_MANIFEST,
+    new TextEncoder().encode(`${JSON.stringify({ version: 1, entries }, null, 2)}\n`),
+  );
+}
+
+/**
+ * Drop what this package put in storage.
+ *
+ * The derived artefacts are a fixed list, but the install is not: it is the
+ * player's folder, whatever that held. So staging records the top-level names it
+ * created ([[STAGED_MANIFEST]]) and this removes exactly those — which is how it
+ * can clear ~1.1 GB without touching anything else sharing the origin.
+ *
+ * Storage staged before this package kept that record has no manifest, and falls
+ * back to the fixed list. That leaves the player's stray assemblies behind, as
+ * it always did; re-staging writes a manifest and the next purge is complete.
+ *
+ * `settings` is Celeste's save directory, which holds the save files *and* the
+ * settings file. Mods are left alone: they are the player's, they are not part
+ * of the install, and nothing regenerates them.
+ */
+export async function purgeStorage(): Promise<{ data: boolean; settings: boolean }> {
+  const root = await opfsRoot();
+
+  const staged = await readStaged(root);
+  const fixed = ['Content', 'Celeste.exe', 'Celeste.dll', PATCHED_ASSEMBLY, ...PATCHER_ASSEMBLIES];
+  const targets = new Set([...(staged ?? fixed), EVEREST_ZIP, EVEREST_DIR]);
+
+  // Never through the manifest: `Celeste/` holds the saves and the mods, and
+  // dropping the whole directory would take both with the install.
+  targets.delete('Celeste');
+
+  const removed = await Promise.all([...targets].map((path) => removePath(root, path)));
+  await removePath(root, STAGED_MANIFEST);
+
+  const settings = await removePath(root, SAVES_DIR);
+  return { data: removed.some(Boolean), settings };
+}
+
 // ---------------------------------------------------------------- the install
 
 /**
@@ -348,6 +427,7 @@ export async function importInstall(
   options: InstallImportOptions = {},
 ): Promise<InstallCheck> {
   const root = await opfsRoot();
+  const before = await rootEntries(root);
 
   let files = 0;
   let bytes = 0;
@@ -358,6 +438,7 @@ export async function importInstall(
     options.onProgress?.(files, bytes);
   }
 
+  await recordStaged(root, before);
   return checkStaged(root);
 }
 
@@ -855,35 +936,15 @@ export async function load(config: CelesteLoadConfig): Promise<CelesteInstance> 
     },
 
     /**
-     * Drops what this package staged. `data` is the game itself — the install,
-     * the patched assemblies and the Everest build; `settings` is Celeste's save
-     * directory, which holds the save files *and* the settings file.
+     * Drops what this package staged — see the standalone `purgeStorage()`,
+     * which this is. Exposed on the instance because the engine contract asks
+     * for it there, and exported as well because a host may want it before
+     * `load()` has ever run.
      *
      * The loader mounts one OPFS root per origin, so this ignores
-     * `storageNamespace`. Call it on a destroyed instance, or before `load()`.
-     *
-     * What it does *not* do is empty the root. A Celeste install is whatever the
-     * player's folder held — 25 top-level entries for a vanilla one, most of
-     * them assemblies this package could not name in advance — and deleting
-     * every entry at the root to catch them would take anything else sharing the
-     * origin with it. So the leftovers are the price of not doing that; see
-     * "What Celeste occupies in OPFS" in the README.
+     * `storageNamespace`.
      */
-    async purgeStorage(): Promise<{ data: boolean; settings: boolean }> {
-      const removals = await Promise.all([
-        removePath(root, 'Content'),
-        removePath(root, 'Celeste.exe'),
-        removePath(root, 'Celeste.dll'),
-        removePath(root, PATCHED_ASSEMBLY),
-        // Hardcoded inside the loader rather than written by the SDK, so they
-        // are easy to miss — and they are what a repatch would rebuild anyway.
-        ...PATCHER_ASSEMBLIES.map((name) => removePath(root, name)),
-        removePath(root, EVEREST_ZIP),
-        removePath(root, EVEREST_DIR),
-      ]);
-      const settings = await removePath(root, SAVES_DIR);
-      return { data: removals.some(Boolean), settings };
-    },
+    purgeStorage,
 
     destroy(): void {
       destroyed = true;
@@ -1004,6 +1065,10 @@ async function stageGame(
     toBytes(config.assets?.game ?? config.assets?.data) ??
     (config.gameProvider ? toBytes(await config.gameProvider()) : null);
 
+  // What was at the root before this ran, so the manifest can record only what
+  // this package added rather than whatever else shares the origin.
+  const before = await rootEntries(root);
+
   if (!supplied) {
     const existing = await checkStaged(root);
     if (existing.ok) return existing;
@@ -1024,6 +1089,7 @@ async function stageGame(
       filter: (path) => !path.startsWith('orig/'),
       onProgress: report,
     });
+    await recordStaged(root, before);
     return checkStaged(root);
   }
 
@@ -1043,6 +1109,7 @@ async function stageGame(
     '',
     report,
   );
+  await recordStaged(root, before);
   return checkStaged(root);
 }
 
@@ -1180,6 +1247,7 @@ export default {
   manifest,
   load,
   stagedInstall,
+  purgeStorage,
   exportSaves,
   importSaves,
   exportInstall,

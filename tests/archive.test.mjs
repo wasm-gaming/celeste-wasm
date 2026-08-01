@@ -16,7 +16,7 @@ Object.defineProperty(globalThis.navigator, 'storage', {
   value: { getDirectory: async () => storage },
 });
 
-const { exportInstall, exportSaves, importInstall, importSaves } = await import(
+const { exportInstall, exportSaves, importInstall, importSaves, purgeStorage } = await import(
   '../dist/celeste/celeste.sdk.js'
 );
 const { readTar } = await import('../dist/celeste/celeste.tar.js');
@@ -193,3 +193,80 @@ test('an install with nothing staged exports an archive rather than throwing', a
   assert.deepEqual(await unpack(await collect(await exportInstall())), {});
   assert.deepEqual(await unpack(await collect(await exportSaves({ gzip: false }))), {});
 });
+
+// ------------------------------------------------------------------ purging --
+
+test('purging removes the whole staged install, not just the names we know', async () => {
+  // The point of the manifest: `FNA.dll` and friends are the player's install,
+  // and no fixed list in this package could have named them.
+  storage = new FakeDirectoryHandle();
+  await importInstall(await withInstall(STAGED));
+
+  assert.ok(Object.keys(read(storage)).some((path) => path.startsWith('Content/')));
+
+  const { data, settings } = await purgeStorage();
+  assert.equal(data, true);
+  assert.equal(settings, false); // the install archive carries no saves
+
+  // Everything the install brought is gone — including `FNA.dll`, which is the
+  // whole point. Mods stay by design; see purgeStorage's contract.
+  assert.deepEqual(Object.keys(read(storage)), ['Celeste/Mods/SomeMod.zip']);
+});
+
+test('purging leaves a sibling on the same origin alone', async () => {
+  storage = tree({ 'snes/rom.sfc': 'another engine', 'snes/state.bin': 'its data' });
+  await importInstall(await withInstall(STAGED));
+
+  await purgeStorage();
+
+  assert.deepEqual(read(storage), {
+    'snes/rom.sfc': 'another engine',
+    'snes/state.bin': 'its data',
+    'Celeste/Mods/SomeMod.zip': 'mod',
+  });
+});
+
+test('purging keeps mods and reports the saves separately', async () => {
+  storage = new FakeDirectoryHandle();
+  await importInstall(await withInstall(STAGED));
+  await importSaves(await collect(await exportSavesFrom(SAVES)));
+
+  const { data, settings } = await purgeStorage();
+
+  assert.equal(data, true);
+  assert.equal(settings, true);
+  // Mods are the player's, are not part of the install, and nothing rebuilds them.
+  assert.equal(read(storage)['Celeste/Mods/SomeMod.zip'], 'mod');
+});
+
+test('storage with no manifest still purges what the old fixed list covered', async () => {
+  // What an install staged before this package kept a record looks like.
+  storage = tree(STAGED);
+
+  const { data } = await purgeStorage();
+
+  assert.equal(data, true);
+  const left = Object.keys(read(storage));
+  assert.ok(!left.includes('Celeste.exe'));
+  assert.ok(!left.some((path) => path.startsWith('Content/')));
+  // …and the documented shortfall: the player's own assemblies stay.
+  assert.ok(left.includes('FNA.dll'));
+});
+
+/** An install archive built from `files`, leaving storage as it was. */
+async function withInstall(files) {
+  const keep = storage;
+  storage = tree(files);
+  const archive = await collect(await exportInstall());
+  storage = keep;
+  return archive;
+}
+
+/** A save archive built from `files`, leaving storage as it was. */
+async function exportSavesFrom(files) {
+  const keep = storage;
+  storage = tree(files);
+  const archive = await exportSaves({ gzip: false });
+  storage = keep;
+  return archive;
+}

@@ -39,8 +39,12 @@ EVEREST_BUILD ?= 0
 # The .NET-for-WebAssembly runtime that loads and patches the player's Celeste:
 # dotnet.js, the split dotnet.native.wasm, FNA/FMOD/SDL3 statics and the
 # MonoMod.WASM assemblies. Built from the loader repo below; by default the
-# pinned prebuilt bundle is downloaded instead, because building it from source
-# needs a patched emsdk, a patched .NET runtime pack and about an hour.
+# pinned prebuilt bundle is downloaded instead, which is what almost everyone
+# wants — the source build AOT compiles and links a ~100 MB wasm binary.
+#
+# `make build-runtime-docker` is that source build, containerised. Reach for it
+# when you are changing the loader itself: the game's paths in storage are
+# string literals inside CelesteLoader.dll, so moving them means rebuilding it.
 RUNTIME_REPO ?= https://github.com/MercuryWorkshop/celeste-wasm
 RUNTIME_REF  ?= latest
 RUNTIME_REV  ?= 70ab8ae24e0ea9f06bc9c9248278038a89cd2a59
@@ -53,6 +57,7 @@ export UPSTREAM_REPO UPSTREAM_REF EVEREST_BUILD RUNTIME_REPO RUNTIME_REF RUNTIME
 
 .PHONY: build build-sdk build-lib build-manifest build-demo build-wasm \
 	build-runtime build-everest build-wasm-docker build-everest-docker \
+	build-runtime-docker \
 	preview preview.single typecheck test release-check i install \
 	clean clean-all help
 
@@ -88,6 +93,9 @@ build-wasm-docker: ## Runtime + Everest → dist/celeste/, in a pinned Linux con
 
 build-everest-docker: ## Just the Everest build, in that container
 	bash scripts/build-everest-docker.sh
+
+build-runtime-docker: ## Build the runtime *from source*, in a container that has emsdk + dotnet 10
+	bash scripts/build-runtime-docker.sh
 
 # --- on the host -------------------------------------------------------------
 # What the container runs, and what a machine with dotnet + mono can run

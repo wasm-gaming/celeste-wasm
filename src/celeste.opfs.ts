@@ -41,6 +41,20 @@ export const PATCHER_ASSEMBLIES: readonly string[] = ['MMHOOK_Celeste.dll', 'Cel
 export const MODS_DIR = 'Celeste/Mods';
 export const SAVES_DIR = 'Celeste/Saves';
 
+/**
+ * Where the SDK records which top-level entries it put in storage.
+ *
+ * A Celeste install is whatever the player's folder held — 25 top-level entries
+ * for a vanilla one, mostly assemblies this package cannot name in advance — so
+ * purging by a fixed list leaves most of it behind, and purging by "everything
+ * at the root" would take anything sharing the origin with it. Recording what
+ * was actually claimed is the only way to remove exactly that.
+ *
+ * It lives under `Celeste/`, which this package already owns, so keeping the
+ * record does not itself claim another name at the root.
+ */
+export const STAGED_MANIFEST = 'Celeste/staged.json';
+
 /** `navigator.storage.getDirectory()`, with a readable failure. */
 export async function opfsRoot(): Promise<FileSystemDirectoryHandle> {
   if (typeof navigator === 'undefined' || !navigator.storage?.getDirectory) {

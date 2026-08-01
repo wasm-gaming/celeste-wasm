@@ -23,7 +23,8 @@ export class FakeFileHandle {
     stats.writes++;
     const chunks = [];
     const handle = this;
-    return new WritableStream({
+
+    const stream = new WritableStream({
       write(chunk) {
         chunks.push(new Uint8Array(chunk));
       },
@@ -38,6 +39,22 @@ export class FakeFileHandle {
         handle.bytes = out;
       },
     });
+
+    // A real FileSystemWritableFileStream is a WritableStream *plus* its own
+    // write()/close(), and `writeFile` uses those directly when it already has
+    // the bytes rather than a stream to pipe. The writer is acquired lazily so
+    // that pipeTo, which locks the stream itself, still works.
+    let writer = null;
+    stream.write = async (chunk) => {
+      writer ??= stream.getWriter();
+      await writer.write(chunk);
+    };
+    stream.close = async () => {
+      writer ??= stream.getWriter();
+      await writer.close();
+    };
+
+    return stream;
   }
 }
 
@@ -75,6 +92,17 @@ export class FakeDirectoryHandle {
     const file = new FakeFileHandle(name);
     this.children.set(name, file);
     return file;
+  }
+
+  async removeEntry(name, { recursive = false } = {}) {
+    const found = this.children.get(name);
+    // The real API rejects rather than resolving quietly, and `removePath`
+    // reads that rejection as "there was nothing there".
+    if (!found) throw new Error(`no such entry: ${name}`);
+    if (found.kind === 'directory' && found.children.size > 0 && !recursive) {
+      throw new Error(`${name} is not empty`);
+    }
+    this.children.delete(name);
   }
 }
 
