@@ -37,6 +37,7 @@ import {
   splitWasmLoader,
   type CelesteExports,
   type DotnetRuntimeAPI,
+  type SplashProgress,
 } from './celeste.runtime.js';
 import { ZipReader } from './celeste.zip.js';
 
@@ -48,6 +49,18 @@ export { manifest };
  * into has to carry this class, whoever created it.
  */
 const CANVAS_CLASS = 'canvas';
+
+/**
+ * ...and the id has to be exactly this.
+ *
+ * The transferred canvas arrives on the worker as `GL.offscreenCanvases[id]`,
+ * and that map is the only way to reach it — a worker has no `document` to
+ * query. SDL then asks for its window by `SDL_EMSCRIPTEN_CANVAS_SELECTOR`,
+ * which defaults to `#canvas`, so the lookup is `GL.offscreenCanvases['canvas']`.
+ * Any other id misses, `SDL_GL_CreateContext` quietly yields no context, and
+ * the first FNA3D call into GL dies on an undefined `GLctx`.
+ */
+const CANVAS_ID = 'canvas';
 
 export type CelesteInstance = EngineInstance & {
   /** What the acceptance check made of the install that booted. */
@@ -73,8 +86,13 @@ export type CelesteLoadConfig = EngineConfig & {
   gameProvider?: () => Promise<AssetData | Blob> | AssetData | Blob;
   /** Staging progress, in files. The runtime download is reported by the browser. */
   onProgress?: (current: number, total: number) => void;
-  /** Everest's splash messages while it loads mods. `null` when it closes. */
-  onSplash?: (message: string | null) => void;
+  /**
+   * Everest's splash messages while it loads mods. `null` when it closes.
+   *
+   * `progress` is present on the messages that carry a mod count, which is what
+   * a determinate loading bar needs; the rest are prose.
+   */
+  onSplash?: (message: string | null, progress?: SplashProgress) => void;
   /** Managed heap size, sampled by the runtime every 30 seconds. */
   onMemory?: (megabytes: number) => void;
   /** Used for the Everest updater, which may need a proxy. Defaults to `fetch`. */
@@ -150,7 +168,14 @@ export async function load(config: CelesteLoadConfig): Promise<CelesteInstance> 
   const ownsCanvas = providedCanvas === null;
   const canvas = providedCanvas ?? document.createElement('canvas');
   canvas.classList.add(CANVAS_CLASS);
-  if (!canvas.id) canvas.id = 'celeste-canvas';
+  if (canvas.id !== CANVAS_ID) {
+    if (canvas.id) {
+      console.warn(
+        `celeste: renaming the render target's id from "${canvas.id}" to "${CANVAS_ID}" — SDL looks the canvas up by that id inside the worker it was transferred to.`,
+      );
+    }
+    canvas.id = CANVAS_ID;
+  }
 
   let restoreContainerPosition: (() => void) | null = null;
 
@@ -210,6 +235,68 @@ export async function load(config: CelesteLoadConfig): Promise<CelesteInstance> 
 
   const swallowContextMenu = (event: Event): void => event.preventDefault();
   canvas.addEventListener('contextmenu', swallowContextMenu);
+
+  // A canvas is not in the tab order and `focus()` on one is a silent no-op
+  // until it has a tabindex. -1 makes it focusable without adding a tab stop.
+  if (!canvas.hasAttribute('tabindex')) canvas.setAttribute('tabindex', '-1');
+  // …and the focus ring that comes with it would draw a browser-blue box around
+  // the picture. Nothing is keyboard-reachable here — the canvas is focused
+  // programmatically, never tabbed to — so the ring marks nothing.
+  canvas.style.outline = 'none';
+
+  const focusCanvas = (): void => {
+    if (!opts.focusCanvas) return;
+    // The canvas being the active element is not enough on its own: leaving
+    // fullscreen can hand focus to the browser's own UI, and a document that
+    // does not have focus receives no keys at all.
+    if (!document.hasFocus()) window.focus();
+    canvas.focus({ preventScroll: true });
+  };
+
+  /**
+   * Fullscreen, in both directions, costs the game its input.
+   *
+   * Leaving it hands focus back to whatever the browser last considered the
+   * page's active element — never the canvas, and sometimes nothing in the page
+   * at all — and SDL reports that as a window focus loss, which is the state
+   * Celeste stops reading the keyboard in. Entering it is the only moment the
+   * Keyboard Lock API will take, and the call at boot ran when the page was
+   * still windowed, so it did nothing.
+   *
+   * The refocus is retried rather than done once: during the transition the
+   * element is not reliably focusable yet, a focus() that lands there is
+   * dropped, and the transition is longer than a frame on every browser that
+   * animates it. Each attempt is a frame apart and they stop as soon as one
+   * takes — or after ~15 frames, at which point the click handler below is the
+   * way back in.
+   */
+  const refocusCanvas = (): void => {
+    if (!opts.focusCanvas) return;
+    let attempts = 0;
+    const attempt = (): void => {
+      if (!canvas.isConnected) return;
+      focusCanvas();
+      if (document.activeElement === canvas && document.hasFocus()) return;
+      if (++attempts < 15) requestAnimationFrame(attempt);
+    };
+    requestAnimationFrame(attempt);
+  };
+
+  const onFullscreenChange = (): void => {
+    if (document.fullscreenElement && opts.lockKeyboard) void lockKeyboard();
+    refocusCanvas();
+  };
+  document.addEventListener('fullscreenchange', onFullscreenChange);
+
+  // Whatever took the focus away — the fullscreen exit, a devtools panel,
+  // another tab — the moment the page has it back the game should too.
+  const onWindowFocus = (): void => focusCanvas();
+  window.addEventListener('focus', onWindowFocus);
+
+  // Clicking the picture is the other way back in, and the one a player reaches
+  // for when the game has stopped responding.
+  const onPointerDown = (): void => focusCanvas();
+  canvas.addEventListener('pointerdown', onPointerDown);
 
   // ------------------------------------------------------------------- staging
 
@@ -296,7 +383,7 @@ export async function load(config: CelesteLoadConfig): Promise<CelesteInstance> 
     }
 
     booted = true;
-    if (opts.focusCanvas) canvas.focus();
+    focusCanvas();
     if (opts.lockKeyboard) void lockKeyboard();
     emit({ type: 'ready' });
 
@@ -390,6 +477,9 @@ export async function load(config: CelesteLoadConfig): Promise<CelesteInstance> 
       stopWatchingMemory?.();
       trackAudio?.();
       canvas.removeEventListener('contextmenu', swallowContextMenu);
+      canvas.removeEventListener('pointerdown', onPointerDown);
+      document.removeEventListener('fullscreenchange', onFullscreenChange);
+      window.removeEventListener('focus', onWindowFocus);
       if (ownsCanvas) canvas.remove();
       restoreContainerPosition?.();
       // The .NET runtime itself stays: a wasm module with live worker threads

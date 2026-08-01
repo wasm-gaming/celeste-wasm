@@ -195,22 +195,76 @@ export function assemblyList(config: MonoConfig): string[] {
   return resources.map((resource) => `${resource.name}|${resource.virtualPath ?? resource.name}`);
 }
 
+/** How far Everest has got through the mod list, when it says so. */
+export interface SplashProgress {
+  loaded: number;
+  total: number;
+  /** The mod it just finished with, if the message named one. */
+  mod?: string;
+  /** Everest is done with the list and the splash is about to go. */
+  done: boolean;
+}
+
+/**
+ * Everest's splash messages are a wire protocol, not prose.
+ *
+ * On the desktop the splash is a separate process reading lines off a named
+ * pipe, and those lines are what reach `JsSplash.OnMessage` here — verbatim.
+ * Handing them to a host as-is puts `#finish0;Almost done...` on its loading
+ * screen, so they get read the way EverestSplash reads them:
+ *
+ *   #progress{loaded};{total};{mod}   one mod finished loading
+ *   #finish{total};{message}          the whole list is done
+ *   #stop                             close the splash
+ *
+ * Anything else is a plain message and is passed through untouched.
+ */
+export function parseSplashMessage(
+  raw: string,
+): { text: string | null; progress?: SplashProgress } {
+  if (raw === '#stop') return { text: null };
+
+  if (raw.startsWith('#progress')) {
+    const [loaded, total, ...rest] = raw.slice('#progress'.length).split(';');
+    const mod = rest.join(';');
+    return {
+      text: mod ? `Loading mods… ${mod}` : 'Loading mods…',
+      progress: { loaded: Number(loaded) || 0, total: Number(total) || 0, mod, done: false },
+    };
+  }
+
+  if (raw.startsWith('#finish')) {
+    const [total, ...rest] = raw.slice('#finish'.length).split(';');
+    const count = Number(total) || 0;
+    return {
+      text: rest.join(';') || 'Almost done…',
+      progress: { loaded: count, total: count, done: true },
+    };
+  }
+
+  return { text: raw };
+}
+
 /**
  * The functions the loader imports out of JavaScript.
  *
  * `JsSplash` is wired to Everest's own splash handler, so its messages are the
- * mod loader reporting progress — the host gets them as `onSplash`. `interop.js`
- * covers two things Mono cannot do quickly enough by itself.
+ * mod loader reporting progress — the host gets them as `onSplash`, parsed out
+ * of the protocol above. `interop.js` covers two things Mono cannot do quickly
+ * enough by itself.
  */
 export function hostImports(options: {
-  onSplash?: (message: string | null) => void;
+  onSplash?: (message: string | null, progress?: SplashProgress) => void;
 }): Record<string, Record<string, unknown>> {
   const { onSplash } = options;
 
   return {
     JsSplash: {
       StartSplash: () => onSplash?.(''),
-      OnMessage: (message: string) => onSplash?.(message),
+      OnMessage: (message: string) => {
+        const { text, progress } = parseSplashMessage(message);
+        onSplash?.(text, progress);
+      },
       EndSplash: () => onSplash?.(null),
     },
     'interop.js': {

@@ -56,7 +56,7 @@ const engine = await load({
   gameDirectory: folderHandle,       // or assets: { game: zipBytes }
   options: { installEverest: true },
   onProgress: (current, total) => { /* files staged */ },
-  onSplash: (message) => { /* Everest, loading mods */ },
+  onSplash: (message, progress) => { /* Everest, loading mods; progress = {loaded,total,mod,done} */ },
   onEvent: (e) => { /* ready | error | exit */ },
 });
 

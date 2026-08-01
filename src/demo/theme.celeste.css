@@ -102,18 +102,6 @@ body {
   border-color: var(--celeste-dash);
 }
 
-/* The folder route's own Start. It has to read as the primary action, because
- * the launcher's Start button below it is inert until a zip is dropped. */
-.summit-bar button.primary {
-  border-color: var(--celeste-berry);
-  background: rgba(var(--celeste-berry-rgb), 0.28);
-  font-weight: 700;
-}
-
-.summit-bar button.primary:hover {
-  background: rgba(var(--celeste-berry-rgb), 0.42);
-}
-
 .summit-bar button:disabled {
   opacity: 0.45;
   cursor: default;
@@ -177,6 +165,9 @@ main .runtime canvas {
   height: 100%;
   max-height: none;
   aspect-ratio: auto;
+  /* The SDK gives the canvas a tabindex so it can be focused programmatically;
+   * the focus ring that comes with it would frame the picture in browser blue. */
+  outline: none;
 }
 
 .stage-message {
@@ -189,4 +180,142 @@ main .runtime canvas {
   color: var(--celeste-berry);
   font-size: 1rem;
   line-height: 1.6;
+}
+
+/* --- the game takes the page ---------------------------------------------- */
+
+/* Once boot starts, the page *is* the game. The header would only take
+ * viewport height away from a picture the game letterboxes itself, and every
+ * message it used to carry is on the stage HUD from here on. It comes back if
+ * the boot fails, because then there is something to act on again. */
+body:has(main.running) .summit-bar {
+  display: none;
+}
+
+body:has(main.running .stage-message),
+body:has(main.running .stage-hud.bad) {
+  overflow: auto;
+}
+
+body:has(main.running .stage-message) .summit-bar,
+body:has(main.running .stage-hud.bad) .summit-bar {
+  display: flex;
+}
+
+main.running {
+  height: 100vh;
+  height: 100dvh;
+}
+
+/* The SDK sizes the drawing buffer from this box, so this is what decides both
+ * the resolution the game runs at and the shape of its window — which is what
+ * Celeste's own aspect and scaling settings act on. */
+main.running .runtime {
+  width: 100vw;
+  height: 100vh;
+  height: 100dvh;
+  aspect-ratio: auto;
+  max-height: none;
+  margin: 0;
+}
+
+/* --- the loading screen --------------------------------------------------- */
+
+/* Over the canvas, never in it: the canvas belongs to a worker from the moment
+ * the runtime starts, so the page cannot paint into it. */
+.stage-hud {
+  position: absolute;
+  inset: 0;
+  z-index: 2;
+  display: grid;
+  place-content: center;
+  justify-items: center;
+  gap: 0.85rem;
+  padding: 2rem;
+  text-align: center;
+  background:
+    radial-gradient(120% 90% at 50% 0%, rgba(var(--celeste-dash-rgb), 0.14), transparent 62%),
+    linear-gradient(180deg, var(--celeste-dusk), var(--celeste-night) 70%);
+  opacity: 1;
+  transition: opacity 500ms ease;
+}
+
+/* Faded out rather than cut, so the first frame of the game arrives under it. */
+.stage-hud.done {
+  opacity: 0;
+  pointer-events: none;
+}
+
+.stage-hud .hud-mark {
+  font-size: 0.85rem;
+  font-weight: 700;
+  letter-spacing: 0.42em;
+  text-indent: 0.42em;
+  color: var(--celeste-snow);
+  opacity: 0.75;
+}
+
+.stage-hud .hud-phase {
+  max-width: 34rem;
+  margin: 0;
+  font-size: 1.15rem;
+  line-height: 1.5;
+  color: var(--celeste-snow);
+  text-wrap: balance;
+}
+
+.stage-hud.bad .hud-phase {
+  color: var(--celeste-berry);
+}
+
+.stage-hud .hud-detail {
+  max-width: 34rem;
+  margin: 0;
+  font-size: 0.85rem;
+  line-height: 1.6;
+  color: var(--celeste-mist);
+  text-wrap: balance;
+}
+
+.stage-hud .hud-bar {
+  position: relative;
+  width: min(26rem, 70vw);
+  height: 6px;
+  border-radius: 999px;
+  background: rgba(244, 247, 255, 0.14);
+  overflow: hidden;
+}
+
+.stage-hud .hud-bar i {
+  position: absolute;
+  inset: 0 auto 0 0;
+  width: 0;
+  border-radius: inherit;
+  background: linear-gradient(90deg, var(--celeste-dash), var(--celeste-berry));
+  transition: width 220ms ease;
+}
+
+/* The long steps — the runtime download, MonoMod, Everest — report messages
+ * rather than fractions, so the bar sweeps instead of filling. */
+.stage-hud .hud-bar.busy i {
+  width: 35%;
+  transition: none;
+  animation: hud-sweep 1.5s ease-in-out infinite;
+}
+
+@keyframes hud-sweep {
+  from {
+    transform: translateX(-100%);
+  }
+  to {
+    transform: translateX(286%);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .stage-hud .hud-bar.busy i {
+    width: 100%;
+    animation: none;
+    opacity: 0.5;
+  }
 }

@@ -71,46 +71,151 @@
       )
     }
 
+    /**
+     * The loading screen, drawn over the stage.
+     *
+     * Boot is minutes long on a first run — copy the install, download the
+     * runtime, then MonoMod over the whole game — and the header that used to
+     * carry that news is hidden once the stage goes fullscreen. So the progress
+     * has to live where the player is already looking.
+     *
+     * It is an overlay rather than something painted into the canvas: the
+     * canvas is handed to a worker with transferControlToOffscreen the moment
+     * the runtime starts, and from then on the page cannot draw a single pixel
+     * into it. The overlay sits on top and comes off when the game is up.
+     */
+    const createStageHud = (stageEl) => {
+      const make = (tag, props) => Object.assign(document.createElement(tag), props)
+
+      const phaseEl = make('p', { className: 'hud-phase', textContent: 'Starting Celeste…' })
+      const fillEl = make('i', {})
+      const barEl = make('div', { className: 'hud-bar busy' })
+      const detailEl = make('p', { className: 'hud-detail', textContent: '' })
+      barEl.append(fillEl)
+
+      const hud = make('div', { className: 'stage-hud', role: 'status' })
+      hud.setAttribute('aria-live', 'polite')
+      hud.append(make('span', { className: 'hud-mark', textContent: 'CELESTE' }), phaseEl, barEl, detailEl)
+      stageEl.append(hud)
+
+      let closed = false
+
+      return {
+        /** Determinate: a fraction the SDK actually knows. */
+        progress(phase, current, total, detail = '') {
+          phaseEl.textContent = `${phase} ${Math.round((current / total) * 100)}%`
+          detailEl.textContent = detail
+          barEl.classList.remove('busy')
+          fillEl.style.width = `${Math.max(0, Math.min(1, current / total)) * 100}%`
+        },
+        /** Indeterminate: the long steps report messages, not percentages. */
+        busy(phase, detail = '') {
+          phaseEl.textContent = phase
+          detailEl.textContent = detail
+          barEl.classList.add('busy')
+          fillEl.style.width = ''
+        },
+        fail(message) {
+          hud.classList.add('bad')
+          phaseEl.textContent = message
+          detailEl.textContent = ''
+          barEl.remove()
+        },
+        close() {
+          if (closed) return
+          closed = true
+          hud.classList.add('done')
+          hud.addEventListener('transitionend', () => hud.remove(), { once: true })
+          setTimeout(() => hud.remove(), 1200)
+        },
+      }
+    }
+
     // Everything both routes share. `attachTo` is whichever stage element the
     // caller cleared for it.
+    //
+    // `main.running` is what takes the page over: the stage grows to the whole
+    // viewport and the header goes away, so from here on the HUD is the only
+    // thing reporting progress. The class goes on *before* load(), because the
+    // SDK sizes the drawing buffer from the stage's box exactly once.
     const boot = async (stageEl, { assets = {}, gameDirectory, fileName }) => {
+      mainEl.classList.add('running')
       setStatus('Staging the game…')
 
-      const instance = await sdk.load({
-        attachTo: stageEl,
-        assets,
-        gameDirectory,
-        options: {
-          installFileName: fileName,
-          // Both routes check the listing before getting here.
-          verifyInstall: false,
-        },
-        onProgress(current, total) {
-          if (total > 0) {
+      const hud = createStageHud(stageEl)
+      const fail = (message) => {
+        mainEl.classList.remove('running')
+        hud.fail(message)
+        setStatus(message, true)
+      }
+
+      try {
+        const instance = await sdk.load({
+          attachTo: stageEl,
+          assets,
+          gameDirectory,
+          options: {
+            installFileName: fileName,
+            // Both routes check the listing before getting here.
+            verifyInstall: false,
+          },
+          onProgress(current, total) {
+            if (total <= 0) return
             setStatus(`Staging the game… ${Math.round((current / total) * 100)}%`)
-          }
-        },
-        onSplash(message) {
-          // Everest's own loading messages, forwarded from the mod loader.
-          if (message === null) setStatus('')
-          else if (message) setStatus(message)
-        },
-        onEvent(event) {
-          if (event.type === 'error') {
-            console.error(event.error)
-            setStatus(event.error.message, true)
-          } else {
+            if (current < total) {
+              hud.progress('Copying your Celeste install…', current, total, `${current} / ${total} files`)
+            } else {
+              // Staging is over; what follows is the runtime download and
+              // MonoMod, neither of which reports a fraction.
+              hud.busy(
+                'Building your patched Celeste…',
+                'Downloading the runtime and running MonoMod over your install. The first run takes a few minutes — after that it is cached.',
+              )
+            }
+          },
+          onSplash(message, progress) {
+            // Everest's own loading messages, forwarded from the mod loader.
+            // The SDK has already read them out of the splash wire protocol,
+            // so `progress` is a real mod count whenever the message carried
+            // one — and there is nothing to show while it is zero (no mods).
+            if (message === null) return setStatus('')
+            if (!message) return
+            setStatus(message)
+
+            if (progress && progress.total > 0 && !progress.done) {
+              hud.progress('Loading mods…', progress.loaded, progress.total, progress.mod ?? '')
+            } else {
+              hud.busy(message, 'Everest is starting the game.')
+            }
+          },
+          onEvent(event) {
+            if (event.type === 'error') {
+              console.error(event.error)
+              fail(event.error.message)
+              return
+            }
+
             console.log('[demo]', event.type)
-            if (event.type === 'ready') setStatus('')
-          }
-        },
-      })
+            if (event.type === 'ready') {
+              setStatus('')
+              hud.close()
+            }
+            if (event.type === 'exit') {
+              mainEl.classList.remove('running')
+              showOnStage(stageEl, 'Celeste exited. Reload the page to play again.')
+            }
+          },
+        })
 
-      instance.start()
+        instance.start()
 
-      // The first boot runs MonoMod over the whole game and takes minutes; the
-      // patched build is cached in storage from then on.
-      return instance
+        // The first boot runs MonoMod over the whole game and takes minutes; the
+        // patched build is cached in storage from then on.
+        return instance
+      } catch (err) {
+        fail(err.message)
+        throw err
+      }
     }
 
     // --- the folder route ---------------------------------------------------
@@ -118,10 +223,12 @@
     // Preferred wherever it exists: no 1.3 GB archive for the player to build,
     // and the SDK copies the install across file by file.
     //
-    // It needs its own trigger. The shared launcher's Start button gates on a
-    // *file* in its ROM slot (`canLaunch = Boolean(romFile && …)`), and a
-    // directory handle never puts one there — so that button would sit dead no
-    // matter how valid the folder is. This one takes over instead.
+    // The header button only ever picks a folder — it never becomes Start, so
+    // a player who handed over the wrong one can hand over another. Starting is
+    // routed through the launcher's own Start button below, which the shared
+    // launcher would otherwise leave inert here: it gates on a *file* in its ROM
+    // slot (`canLaunch = Boolean(romFile && …)`), and a directory handle never
+    // puts one there.
     const pickButton = document.getElementById('pick-folder')
     let folderReady = false
 
@@ -133,8 +240,11 @@
         await boot(stage, { gameDirectory: gameDirectory(), fileName: 'Celeste (folder)' })
       } catch (err) {
         console.error(err)
+        // boot() has already put the message on the HUD and brought the header
+        // back; this replaces the dead stage and lets the player try again.
         setStatus(err.message, true)
         showOnStage(stage, err.message)
+        pickButton.disabled = false
       }
     }
 
@@ -173,22 +283,29 @@
       setStatus('This browser cannot hand over a folder — supply a zip, or use Chrome.')
     }
 
+    // The picker stays a picker. Starting is the Start button's job — and a
+    // player who handed over the wrong folder needs this button to still be the
+    // way to hand over another one.
     if (canPickDirectory) {
       pickButton.hidden = false
       pickButton.addEventListener('click', async () => {
-        if (folderReady) return startFromFolder()
-
         setStatus('Reading folder…')
         try {
           const check = await pickGameDirectory()
-          if (!check) return setStatus('')
-          if (!check.ok) return setStatus(check.reason, true)
+          // Dialog closed: whatever was picked before is still picked.
+          if (!check) {
+            return setStatus(folderReady ? 'Celeste found — press Start.' : '')
+          }
+          // A folder that does not check out replaces the one that did —
+          // pickGameDirectory only keeps the handle when the check passes.
+          if (!check.ok) {
+            folderReady = false
+            return setStatus(check.reason, true)
+          }
 
           folderReady = true
-          pickButton.textContent = 'Start ▸'
-          pickButton.classList.add('primary')
           setStatus(
-            `Celeste found${check.hasEverest ? ' (already Everest-patched)' : ''} — press Start above.`,
+            `Celeste found${check.hasEverest ? ' (already Everest-patched)' : ''} — press Start, or pick another folder.`,
           )
         } catch (err) {
           setStatus(err.message, true)
