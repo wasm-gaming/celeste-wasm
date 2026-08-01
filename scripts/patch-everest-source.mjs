@@ -1,5 +1,6 @@
 #!/usr/bin/env node
-// Stamp a version onto an Everest checkout before building it.
+// Prepare an Everest checkout for the browser build: stamp a version onto it,
+// and drop the one boot-time call the browser can never make.
 //
 // Upstream does this in .azure-pipelines/prebuild.ps1, from Azure build
 // variables that do not exist outside their pipeline. Two things come out of
@@ -80,6 +81,33 @@ const changes = [];
 `,
   );
   changes.push(`${rel}: EverestBuild${build}`);
+}
+
+// ------------------------------------------------------- rich presence icons --
+//
+// Everest ends its boot by asking celestemodupdater.0x0a.de for the list of
+// Discord rich-presence icon hashes. That host sends no CORS headers, and the
+// page the runtime needs is cross-origin isolated, so the browser blocks the
+// request before it leaves — every boot, with a console error to match. The
+// call buys nothing here either way: rich presence needs the Discord Game SDK's
+// native library, which no WebAssembly build has.
+
+{
+  const rel = 'Celeste.Mod.mm/Mod/Everest/Everest.cs';
+  const path = join(srcDir, rel);
+  const before = readFileSync(path, 'utf8');
+  const after = before.replace(
+    /^([ \t]*)DiscordSDK\.LoadRichPresenceIcons\(\);[ \t]*$/m,
+    '$1// [wasm] Removed: the icon host sends no CORS headers, and a cross-origin\n' +
+      '$1// isolated page cannot reach it. Discord rich presence needs a native\n' +
+      '$1// library that does not exist in this build anyway.',
+  );
+  if (after === before) {
+    console.error(`[patch] could not find the LoadRichPresenceIcons() call in ${rel}`);
+    process.exit(1);
+  }
+  writeFileSync(path, after);
+  changes.push(`${rel}: dropped the Discord rich-presence icon fetch`);
 }
 
 for (const change of changes) {

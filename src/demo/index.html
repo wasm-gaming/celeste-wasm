@@ -136,8 +136,9 @@
     //
     // `main.running` is what takes the page over: the stage grows to the whole
     // viewport and the header goes away, so from here on the HUD is the only
-    // thing reporting progress. The class goes on *before* load(), because the
-    // SDK sizes the drawing buffer from the stage's box exactly once.
+    // thing reporting progress. The class goes on *before* load() so the game
+    // boots straight into the size it will run at — the SDK measures the stage
+    // just before the game reads its settings and picks the resolution there.
     const boot = async (stageEl, { assets = {}, gameDirectory, fileName }) => {
       mainEl.classList.add('running')
       setStatus('Staging the game…')

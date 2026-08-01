@@ -33,7 +33,7 @@ export const CELESTE_ENGINE_OPTIONS: CelesteOptionSpec[] = [
     key: 'fit',
     label: 'Canvas fit',
     description:
-      "How the picture is sized. 'container' renders at the size of the element the game is mounted in, which is what makes the game's own fullscreen and scaling settings behave the way they do on the desktop build. 'fixed' pins the drawing buffer to renderWidth×renderHeight and lets host CSS scale it, the equivalent of choosing a resolution in the video menu. 'window' fills the browser window — only correct on a page that is nothing but the game.",
+      "Where the picture is laid out, and which box the resolution is taken from. 'container' letterboxes the game inside the element it is mounted in and derives the resolution from that box. 'fixed' asks for renderWidth×renderHeight and lets host CSS scale the result, the equivalent of choosing a resolution in the video menu. 'window' letterboxes it over the browser window — only correct on a page that is nothing but the game. Whichever is chosen, the picture is always 16:9: the browser build renders at a whole multiple of 320×180 and cannot be stretched to another shape.",
     type: 'enum',
     default: 'container',
     values: [
@@ -45,7 +45,8 @@ export const CELESTE_ENGINE_OPTIONS: CelesteOptionSpec[] = [
   {
     key: 'renderWidth',
     label: 'Render width',
-    description: "Drawing buffer width when fit is 'fixed'. Ignored otherwise.",
+    description:
+      "Requested resolution width when fit is 'fixed'. Rounded down to a whole multiple of 320, because the game's window is always WindowScale×320 by WindowScale×180, and capped at 1920: every frame is composed in a 1922×1082 target before it reaches the window, so a larger one shows nothing more. Ignored otherwise.",
     type: 'integer',
     default: 1920,
     minimum: 320,
@@ -53,10 +54,19 @@ export const CELESTE_ENGINE_OPTIONS: CelesteOptionSpec[] = [
   {
     key: 'renderHeight',
     label: 'Render height',
-    description: "Drawing buffer height when fit is 'fixed'. Ignored otherwise.",
+    description:
+      "Requested resolution height when fit is 'fixed'. Rounded down to a whole multiple of 180 and capped at 1080 — and the smaller of the two axes wins, since the picture cannot be anything but 16:9. Ignored otherwise.",
     type: 'integer',
     default: 1080,
     minimum: 180,
+  },
+  {
+    key: 'syncResolution',
+    label: 'Match the resolution to the page',
+    description:
+      "Write the window scale the fit above works out into Celeste's own settings file before the game reads it. This is the only way the resolution can follow the page: the browser build pins the window to WindowScale×320 by WindowScale×180 and the canvas belongs to a worker, so nothing on the page can resize it once the game is up. Turn it off to leave whatever the player chose in Options → Video alone and just scale the picture.",
+    type: 'boolean',
+    default: true,
   },
   {
     key: 'installEverest',
@@ -182,6 +192,7 @@ export interface CelesteOptions {
   fit?: CelesteFit;
   renderWidth?: number;
   renderHeight?: number;
+  syncResolution?: boolean;
   installEverest?: boolean;
   everestSource?: 'bundled' | 'updater';
   everestBranch?: 'stable' | 'beta' | 'dev';
@@ -211,6 +222,7 @@ export const DEFAULT_CELESTE_OPTIONS: Required<
     | 'fit'
     | 'renderWidth'
     | 'renderHeight'
+    | 'syncResolution'
     | 'installEverest'
     | 'everestSource'
     | 'everestBranch'
@@ -230,6 +242,7 @@ export const DEFAULT_CELESTE_OPTIONS: Required<
   fit: 'container',
   renderWidth: 1920,
   renderHeight: 1080,
+  syncResolution: true,
   installEverest: true,
   everestSource: 'bundled',
   everestBranch: 'stable',

@@ -20,6 +20,7 @@ import {
   MODS_DIR,
   opfsRoot,
   PATCHED_ASSEMBLY,
+  readFile,
   removePath,
   SAVES_DIR,
   VFS_ROOT,
@@ -195,15 +196,19 @@ export async function load(config: CelesteLoadConfig): Promise<CelesteInstance> 
       }
       canvas.style.position = 'absolute';
       canvas.style.inset = '0';
-      canvas.style.width = '100%';
-      canvas.style.height = '100%';
+      // Auto margins against `inset: 0` are what centre the letterboxed
+      // picture once `fitPicture()` below gives it a size of its own.
+      canvas.style.margin = 'auto';
     } else if (opts.fit === 'window') {
       canvas.style.position = 'fixed';
       canvas.style.inset = '0';
-      canvas.style.width = '100vw';
-      canvas.style.height = '100vh';
+      canvas.style.margin = 'auto';
     } else {
+      // A fixed buffer is scaled by CSS, and the canvas carries its own aspect
+      // ratio, so bounding it on both axes is what keeps it inside the page
+      // whichever way the window is resized.
       canvas.style.maxWidth = '100%';
+      canvas.style.maxHeight = '100%';
       canvas.style.height = 'auto';
     }
 
@@ -212,26 +217,115 @@ export async function load(config: CelesteLoadConfig): Promise<CelesteInstance> 
 
   if (opts.pixelated) canvas.style.imageRendering = 'pixelated';
 
-  // The drawing buffer is FNA's window: what goes here is the resolution
-  // Celeste's video settings act on. It is sized once — after the canvas is
-  // transferred to the worker, the main thread can no longer touch it, so
-  // there is no resize observer here the way there is for an in-page renderer.
+  // ------------------------------------------------------------------ sizing
+
+  /** The box the picture has to fit inside, in CSS pixels. */
+  const boxElement = ownsCanvas && attachTo ? attachTo : canvas;
+
+  const measureBox = (): { width: number; height: number } => {
+    if (opts.fit === 'window') return { width: window.innerWidth, height: window.innerHeight };
+    const rect = boxElement.getBoundingClientRect();
+    return { width: rect.width, height: rect.height };
+  };
+
   const ratio = window.devicePixelRatio > 0 ? window.devicePixelRatio : 1;
-  if (opts.fit === 'fixed') {
-    canvas.width = opts.renderWidth;
-    canvas.height = opts.renderHeight;
-  } else {
-    const rect = canvas.getBoundingClientRect();
-    canvas.width = Math.max(manifest.video.baseWidth, Math.round(rect.width * ratio));
-    canvas.height = Math.max(manifest.video.baseHeight, Math.round(rect.height * ratio));
-    if (rect.width < 1 || rect.height < 1) {
+
+  /**
+   * The resolution the game will run at, as Celeste's own `WindowScale`.
+   *
+   * Not a free choice: the browser build hooks `Settings.ApplyScreen()` and
+   * pins the window to `WindowScale × 320` by `WindowScale × 180` with
+   * fullscreen off, so every resolution it can run at is a whole multiple of
+   * the gameplay buffer — and 16:9, whatever shape the page's box is.
+   */
+  let windowScale = MIN_WINDOW_SCALE;
+  let pictureWidth = manifest.video.baseWidth;
+  let pictureHeight = manifest.video.baseHeight;
+
+  /**
+   * Fit the picture to the page, on every resize.
+   *
+   * Only the box moves: the resolution is settled before the game boots and
+   * cannot be changed afterwards. So the job here is to give the canvas the
+   * largest rectangle of the picture's shape that fits its box and centre it,
+   * letting the container show through around it. Stretching it to a box of
+   * another shape would distort a picture the game has already letterboxed
+   * itself. The shape is all this needs, and the shape is always 16:9 — so it
+   * stays right even when the resolution is the player's rather than ours.
+   */
+  const fitPicture = (): void => {
+    // A canvas the host styles is the host's to lay out, and a 'fixed' buffer
+    // is scaled by host CSS by definition.
+    if (!ownsCanvas || opts.fit === 'fixed') return;
+
+    const box = measureBox();
+    if (box.width < 1 || box.height < 1) return;
+
+    const scale = Math.min(box.width / pictureWidth, box.height / pictureHeight);
+    canvas.style.width = `${Math.round(pictureWidth * scale)}px`;
+    canvas.style.height = `${Math.round(pictureHeight * scale)}px`;
+  };
+
+  /**
+   * Work the resolution out from what the page has settled on *now*.
+   *
+   * Called twice: once here, so the element has a sane shape while the game is
+   * still being staged, and once again just before the game reads its settings
+   * — the box is often not final at `load()` time (a host that sizes its
+   * container afterwards, the demo taking the page over on boot) and staging
+   * can take minutes.
+   *
+   * The drawing buffer it writes is only what the element shows until the first
+   * frame arrives: the game sets its own window size on the way up, which SDL
+   * puts straight into the canvas from inside the render worker, and after
+   * `transferControlToOffscreen()` the setter throws.
+   */
+  const resolveResolution = (warn: boolean): void => {
+    const box = measureBox();
+    const sized = box.width >= 1 && box.height >= 1;
+
+    if (!sized && warn && opts.fit !== 'fixed') {
       console.warn(
-        `celeste: the render target has no size yet; rendering at ${opts.renderWidth}×${opts.renderHeight} until it does. Give the container a width and height in CSS.`,
+        `celeste: the render target has no size; rendering at ${opts.renderWidth}×${opts.renderHeight}. Give the container a width and height in CSS.`,
       );
-      canvas.width = opts.renderWidth;
-      canvas.height = opts.renderHeight;
     }
-  }
+
+    windowScale =
+      opts.fit === 'fixed' || !sized
+        ? windowScaleFor(opts.renderWidth, opts.renderHeight)
+        : windowScaleFor(box.width * ratio, box.height * ratio);
+    pictureWidth = windowScale * manifest.video.baseWidth;
+    pictureHeight = windowScale * manifest.video.baseHeight;
+
+    if (
+      warn &&
+      opts.fit === 'fixed' &&
+      (pictureWidth !== opts.renderWidth || pictureHeight !== opts.renderHeight)
+    ) {
+      const why =
+        windowScale === MAX_WINDOW_SCALE
+          ? `is past what the game composes — every frame goes through a 1922×1082 target before it reaches the window, so ${pictureWidth}×${pictureHeight} is the last resolution that adds anything`
+          : `is not a whole multiple of ${manifest.video.baseWidth}×${manifest.video.baseHeight}, which is the only shape the browser build's window comes in — rendering at ${pictureWidth}×${pictureHeight}`;
+      console.warn(`celeste: ${opts.renderWidth}×${opts.renderHeight} ${why}.`);
+    }
+
+    try {
+      canvas.width = pictureWidth;
+      canvas.height = pictureHeight;
+    } catch {
+      // Already transferred: a host reusing a canvas from a previous instance.
+    }
+    fitPicture();
+  };
+
+  resolveResolution(false);
+
+  const onResize = (): void => fitPicture();
+  window.addEventListener('resize', onResize);
+  // The window is not the only thing that moves the box: a host panel opening,
+  // a header going away, the demo taking the page over on boot.
+  const boxObserver = typeof ResizeObserver === 'undefined' ? null : new ResizeObserver(onResize);
+  boxObserver?.observe(boxElement);
 
   const swallowContextMenu = (event: Event): void => event.preventDefault();
   canvas.addEventListener('contextmenu', swallowContextMenu);
@@ -284,6 +378,10 @@ export async function load(config: CelesteLoadConfig): Promise<CelesteInstance> 
 
   const onFullscreenChange = (): void => {
     if (document.fullscreenElement && opts.lockKeyboard) void lockKeyboard();
+    // Entering or leaving fullscreen changes the box without always changing
+    // the window, and the transition outlasts this event on most browsers.
+    fitPicture();
+    requestAnimationFrame(fitPicture);
     refocusCanvas();
   };
   document.addEventListener('fullscreenchange', onFullscreenChange);
@@ -314,6 +412,11 @@ export async function load(config: CelesteLoadConfig): Promise<CelesteInstance> 
 
   await ensureDirectory(root, MODS_DIR);
   await ensureDirectory(root, SAVES_DIR);
+
+  // Last chance to read the page: the game deserialises its settings inside
+  // `Init()`, a few lines below, and from then on the resolution is its own.
+  resolveResolution(true);
+  if (opts.syncResolution) await applyWindowScale(root, windowScale);
 
   // ------------------------------------------------------------------- runtime
 
@@ -480,6 +583,8 @@ export async function load(config: CelesteLoadConfig): Promise<CelesteInstance> 
       canvas.removeEventListener('pointerdown', onPointerDown);
       document.removeEventListener('fullscreenchange', onFullscreenChange);
       window.removeEventListener('focus', onWindowFocus);
+      window.removeEventListener('resize', onResize);
+      boxObserver?.disconnect();
       if (ownsCanvas) canvas.remove();
       restoreContainerPosition?.();
       // The .NET runtime itself stays: a wasm module with live worker threads
@@ -503,6 +608,69 @@ export async function load(config: CelesteLoadConfig): Promise<CelesteInstance> 
 
   pageInstance = instance;
   return instance;
+}
+
+// -------------------------------------------------------------------- sizing
+
+/**
+ * The window scales worth asking for.
+ *
+ * `WindowScale` is Celeste's own "Window Size" setting and multiplies the
+ * 320×180 gameplay buffer, so 6 is 1920×1080. The ceiling is there because the
+ * game composes every frame — the upscaled gameplay buffer, the HUD, the menus
+ * and the hi-res fonts — into a single 1922×1082 target and only then blits it
+ * to the window. Past 6 there is no more picture to see: the same 1080p frame
+ * is scaled up further, for nothing but fill rate.
+ */
+const MIN_WINDOW_SCALE = 1;
+const MAX_WINDOW_SCALE = 6;
+
+/** Celeste's settings file, inside the save directory it shares with the saves. */
+const SETTINGS_FILE = `${SAVES_DIR}/settings.celeste`;
+
+/** Largest whole multiple of the gameplay buffer that fits in `width`×`height`. */
+export function windowScaleFor(width: number, height: number): number {
+  const scale = Math.floor(
+    Math.min(width / manifest.video.baseWidth, height / manifest.video.baseHeight),
+  );
+  return Math.max(MIN_WINDOW_SCALE, Math.min(MAX_WINDOW_SCALE, scale || MIN_WINDOW_SCALE));
+}
+
+/**
+ * `settings.celeste`, with the window scale set to `scale`.
+ *
+ * The file is the YAML Celeste writes itself, and the rest of it is the
+ * player's — key bindings, audio levels, language — so the one line is edited
+ * in place and everything else is left byte for byte. `null` is a first run:
+ * the game fills in every other field from its own defaults and writes the
+ * whole file back.
+ */
+export function settingsWithWindowScale(settings: string | null, scale: number): string {
+  const line = `WindowScale: ${scale}`;
+  if (settings === null) return `${line}\n`;
+  if (/^WindowScale:[^\n]*$/m.test(settings)) {
+    return settings.replace(/^WindowScale:[^\n]*$/m, line);
+  }
+  return `${settings.endsWith('\n') ? settings : `${settings}\n`}${line}\n`;
+}
+
+/**
+ * Put the resolution in Celeste's settings, before Celeste reads them.
+ *
+ * The page has no other way to ask for one. The browser build hooks
+ * `Settings.ApplyScreen()` and forces the window to `WindowScale × 320` by
+ * `WindowScale × 180`, so it never looks at the canvas; the canvas belongs to
+ * the render worker from the first pthread onwards, so nothing on the page can
+ * resize it afterwards either; and the loader exports no way in. What is left
+ * is the settings file the game deserialises during `Init()`.
+ */
+async function applyWindowScale(root: FileSystemDirectoryHandle, scale: number): Promise<void> {
+  const existing = await readFile(root, SETTINGS_FILE);
+  const before = existing ? new TextDecoder().decode(existing) : null;
+  const after = settingsWithWindowScale(before, scale);
+
+  if (after === before) return;
+  await writeFile(root, SETTINGS_FILE, new TextEncoder().encode(after));
 }
 
 // ---------------------------------------------------------------------- steps

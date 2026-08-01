@@ -105,7 +105,7 @@ Celeste is a full game, not a core: it ships its own settings menu and Everest
 adds a second one. Video, audio, key bindings, language and every mod toggle
 live there, and this package deliberately does not put a third settings overlay
 in front of them. What is left is the boot-time surface the browser owns:
-`fit`, `renderWidth`/`renderHeight`, `installEverest`, `everestSource`,
+`fit`, `renderWidth`/`renderHeight`, `syncResolution`, `installEverest`, `everestSource`,
 `everestBranch`, `repatch`, `verifyInstall`, `pixelated`, `focusCanvas`,
 `lockKeyboard`, `suspendAudioWhenHidden`, `autoStart`, `jiterpreter`,
 `pthreadPoolSize`, `seamlessFrames`, `runtimeBaseUrl`, `extraRuntimeOptions`.
@@ -113,17 +113,41 @@ in front of them. What is left is the boot-time surface the browser owns:
 ### Sizing: `options.fit`
 
 A canvas has two sizes — the **box** it occupies on the page and the **drawing
-buffer** it renders into — and for an FNA game the drawing buffer *is* the
-game's window. Celeste renders its 320×180 gameplay buffer and then upscales it
-to that window, so what goes in the buffer is the resolution its video settings
-act on.
+buffer** it renders into — and neither of them is the page's to set here.
 
-The canvas is **transferred to a worker** at boot, which makes this a one-time
-decision: once the renderer owns it, the main thread cannot resize it, and
-there is no `ResizeObserver` here the way there is for an in-page renderer.
+The drawing buffer is the game's window, and the browser build decides that on
+its own. Upstream hooks `Settings.ApplyScreen()` and pins the window to
+`WindowScale × 320` by `WindowScale × 180` with fullscreen off, so **every
+resolution the game can run at is a whole multiple of the 320×180 gameplay
+buffer, and always 16:9**. FNA pushes that size into the canvas through SDL from
+inside the render worker, over anything the page wrote there. The canvas is also
+**transferred to that worker** at boot, after which the page cannot resize the
+buffer at all — and the game never learns of a page resize, because an
+`OffscreenCanvas` in a worker raises no resize events and the loader exports no
+way in.
 
-**`'container'` (default)** — the buffer is set from the element's box (times
-the device pixel ratio) at load time. Give the container a size:
+So the SDK does the only two things that work:
+
+1. **It picks the resolution before the game reads it.** Just before boot it
+   measures the box, works out the largest window scale that fits (times the
+   device pixel ratio, capped at 6 — 1920×1080, because the game composes every
+   frame into a 1922×1082 target before it ever reaches the window, so a larger
+   one only upscales the same picture), and writes that one line into
+   `Saves/settings.celeste`, editing the file in place so the player's other
+   settings survive. `options.syncResolution: false` turns this off and leaves
+   whatever the player chose in Options → Video alone.
+2. **It keeps the box fitted.** On window resizes, on container resizes and
+   across fullscreen, the canvas is scaled to the largest 16:9 rectangle that
+   fits its container and centred there, with the container showing through
+   around it. Only for a canvas the SDK created; one supplied through `canvasEl`
+   is laid out by whoever supplied it.
+
+What no resize can do is change the resolution mid-run. That takes a reload —
+or Celeste's own Options → Video, which the hook honours because it goes through
+`ApplyScreen()`.
+
+**`'container'` (default)** — the resolution comes from the element's box, and
+the picture is letterboxed inside it. Give the container a size:
 
 ```css
 #game-root { width: 100vw; height: 100vh; }
@@ -131,13 +155,13 @@ the device pixel ratio) at load time. Give the container a size:
 
 An unsized container falls back to `renderWidth`×`renderHeight` and warns.
 
-**`'fixed'`** — the buffer is pinned to `renderWidth`×`renderHeight` (1920×1080
-by default) and host CSS scales the result. The equivalent of picking a
-resolution in the video menu, and the predictable choice for a page whose layout
-moves.
+**`'fixed'`** — the resolution is `renderWidth`×`renderHeight` (1920×1080 by
+default), rounded to the nearest whole multiple of 320×180, and host CSS scales
+the result. The predictable choice for a page whose layout moves.
 
-**`'window'`** — the canvas is `position: fixed` over the viewport. Right for a
-page that is nothing but the game, wrong inside a host container.
+**`'window'`** — the canvas is `position: fixed` over the viewport, resolution
+taken from the viewport. Right for a page that is nothing but the game, wrong
+inside a host container.
 
 ### Contract notes
 

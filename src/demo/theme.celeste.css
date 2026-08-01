@@ -156,15 +156,20 @@ main .runtime {
   background: #000;
 }
 
-/* The SDK writes these inline too, for hosts with no stylesheet of their own;
- * repeating them here keeps the box right before the canvas is created. */
+/* The picture is always 16:9 — the browser build renders at a whole multiple of
+ * 320×180 and nothing on the page can talk it out of that — so the canvas is
+ * letterboxed inside the stage rather than stretched to it. The SDK writes the
+ * exact pixel size inline on every resize; these are the same rules in CSS, for
+ * the moment before it does and for hosts with no stylesheet of their own. */
 main .runtime canvas {
   position: absolute;
   inset: 0;
-  width: 100%;
-  height: 100%;
-  max-height: none;
-  aspect-ratio: auto;
+  margin: auto;
+  width: auto;
+  height: auto;
+  max-width: 100%;
+  max-height: 100%;
+  aspect-ratio: 16 / 9;
   /* The SDK gives the canvas a tabindex so it can be focused programmatically;
    * the focus ring that comes with it would frame the picture in browser blue. */
   outline: none;
@@ -207,9 +212,11 @@ main.running {
   height: 100dvh;
 }
 
-/* The SDK sizes the drawing buffer from this box, so this is what decides both
- * the resolution the game runs at and the shape of its window — which is what
- * Celeste's own aspect and scaling settings act on. */
+/* The SDK measures this box just before the game reads its settings and writes
+ * the matching window scale into them, so this is what decides the resolution
+ * Celeste boots at — the largest whole multiple of 320×180 that fits. It cannot
+ * be changed after that, so resizing the window only rescales the picture
+ * inside this box; the black around it is this element showing through. */
 main.running .runtime {
   width: 100vw;
   height: 100vh;
