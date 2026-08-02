@@ -19,6 +19,14 @@ test('dist/manifest.json is in sync with the typed manifest', () => {
   assert.deepEqual(emitted, JSON.parse(JSON.stringify(manifest)));
 });
 
+// The version is written in two files and `npm version` only knows about one of
+// them, so nothing but this test stops a release from shipping a manifest that
+// claims the previous one. `node scripts/sync-version.mjs` is the fix.
+test('the manifest version matches package.json', () => {
+  const pkg = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8'));
+  assert.equal(manifest.version, pkg.version);
+});
+
 test('the game asset points at the directory the loader mounts', () => {
   const game = manifest.assets.find((asset) => asset.key === 'game');
   assert.ok(game, 'manifest declares a game asset');

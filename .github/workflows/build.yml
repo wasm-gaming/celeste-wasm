@@ -1,20 +1,28 @@
 name: Build
 
+# Builds the three halves of a release and leaves them as artifacts. What
+# happens to them afterwards — Release assets, npm, Pages — belongs to
+# release.yml, which calls this workflow.
 on:
-  push:
-    branches:
-      - main
-    tags:
-      - 'v*'
   pull_request:
   workflow_dispatch:
+  workflow_call:
+    inputs:
+      version:
+        description: >-
+          Version to stamp across package.json and the manifest before building.
+          Blank builds whatever the checkout says, which is what a PR wants.
+        type: string
+        default: ''
 
 permissions:
   contents: read
 
 concurrency:
-  group: pages
-  cancel-in-progress: false
+  # Per ref, and only PRs get cancelled: a release build is doing work nothing
+  # else will redo, and the pushes behind it are minutes apart at most.
+  group: build-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 env:
   # Keep in sync with the Makefile; used for the cache keys.
@@ -30,16 +38,36 @@ jobs:
         with:
           node-version: 24
           cache: npm
+      # Only this job needs it: `everest` compiles C# and `runtime` downloads a
+      # pinned bundle, neither of which reads package.json. Here it decides what
+      # dist/manifest.json and the published sources say, so it has to happen
+      # before the build rather than in the commit that follows it.
+      - name: Stamp the release version
+        if: inputs.version != ''
+        run: node scripts/sync-version.mjs "${{ inputs.version }}"
       - name: Install dependencies
         run: npm ci
       - name: Build SDK (TypeScript + manifest + demo shell)
         run: make build-sdk
       - name: Test
         run: make test
+
+      # Packed here, where the version is already stamped and dist/ is on disk,
+      # so the bytes that get published are the bytes that were tested — rather
+      # than a tree reassembled on another runner out of an artifact, a checkout
+      # and a version rewrite. On a pull request it doubles as the check that
+      # every `files` entry in package.json still resolves.
+      - name: Pack
+        run: npm pack
+
       - uses: actions/upload-artifact@v4
         with:
           name: sdk-dist
           path: dist/
+      - uses: actions/upload-artifact@v4
+        with:
+          name: npm-tarball
+          path: '*.tgz'
 
   everest:
     runs-on: ubuntu-latest
@@ -73,7 +101,9 @@ jobs:
       - uses: actions/upload-artifact@v4
         with:
           name: everest-dist
-          path: dist/celeste/everest.*
+          path: |
+            dist/celeste/everest.*
+            dist/celeste/celeste-icon.png
 
   runtime:
     runs-on: ubuntu-latest
@@ -101,97 +131,3 @@ jobs:
           path: |
             dist/celeste/_framework/
             dist/celeste/runtime.json
-
-  release:
-    needs: [sdk, everest, runtime]
-    if: startsWith(github.ref, 'refs/tags/')
-    runs-on: ubuntu-latest
-    permissions:
-      contents: write
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/download-artifact@v4
-        with:
-          name: sdk-dist
-          path: dist
-      - uses: actions/download-artifact@v4
-        with:
-          name: everest-dist
-          path: dist/celeste
-      - uses: actions/download-artifact@v4
-        with:
-          name: runtime-dist
-          path: dist
-
-      # The runtime is a quarter of a gigabyte and carries several third-party
-      # licences (see NOTICE.md), so it belongs on a Release rather than in an
-      # npm tarball. Hosts point `options.runtimeBaseUrl` at it.
-      - name: Pack the runtime
-        run: |
-          tar -C dist/celeste -caf celeste-runtime.tar.zst _framework runtime.json
-          ls -la celeste-runtime.tar.zst
-
-      - name: Attach artifacts to Release
-        uses: softprops/action-gh-release@v2
-        with:
-          files: |
-            celeste-runtime.tar.zst
-            dist/celeste/everest.zip
-            dist/celeste/everest.json
-            dist/celeste/celeste.sdk.js
-            dist/celeste/celeste.sdk.d.ts
-            dist/celeste/celeste.manifest.js
-            dist/celeste/celeste.manifest.d.ts
-            dist/celeste/celeste.options.js
-            dist/celeste/celeste.options.d.ts
-            dist/celeste/celeste.install.js
-            dist/celeste/celeste.install.d.ts
-            dist/celeste/celeste.opfs.js
-            dist/celeste/celeste.opfs.d.ts
-            dist/celeste/celeste.runtime.js
-            dist/celeste/celeste.runtime.d.ts
-            dist/celeste/celeste.xxh64.js
-            dist/celeste/celeste.xxh64.d.ts
-            dist/celeste/celeste.zip.js
-            dist/celeste/celeste.zip.d.ts
-            dist/manifest.json
-            dist/index.html
-            dist/demo.js
-            NOTICE.md
-
-  pages:
-    needs: [sdk, everest, runtime]
-    if: github.ref == 'refs/heads/main'
-    runs-on: ubuntu-latest
-    permissions:
-      contents: read
-      pages: write
-      id-token: write
-    environment:
-      name: github-pages
-      url: ${{ steps.deploy.outputs.page_url }}
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/download-artifact@v4
-        with:
-          name: sdk-dist
-          path: dist
-      - uses: actions/download-artifact@v4
-        with:
-          name: everest-dist
-          path: dist/celeste
-      - uses: actions/download-artifact@v4
-        with:
-          name: runtime-dist
-          path: dist
-      - uses: actions/configure-pages@v5
-        with:
-          enablement: true
-      # Pages cannot send COOP/COEP, and the runtime needs them. dist/coi.js
-      # installs a service worker that adds both from inside the browser, which
-      # is why the demo shell loads it before anything else.
-      - uses: actions/upload-pages-artifact@v3
-        with:
-          path: dist
-      - id: deploy
-        uses: actions/deploy-pages@v4

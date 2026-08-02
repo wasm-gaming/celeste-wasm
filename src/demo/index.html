@@ -4,6 +4,11 @@
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=0" />
   <title>Celeste + Everest — WebAssembly SDK demo</title>
+  <!-- The strawberry, straight out of the Everest build — `build-everest` drops
+       it beside everest.zip. Nothing here is checked in, so a dist/ that has not
+       had `make build-everest` run over it serves no favicon rather than a
+       stale one. -->
+  <link rel="icon" type="image/png" href="./celeste/celeste-icon.png" />
   <link rel="stylesheet" href="./demo/demo.css" />
   <link rel="stylesheet" href="./theme.celeste.css" />
   <!-- Adds COOP/COEP through a service worker on hosts that will not send them

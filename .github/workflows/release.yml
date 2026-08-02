@@ -1,21 +1,165 @@
 name: Release
 
+# Cuts a release, start to finish: work out the next version, build everything
+# with it, and only then write the bump into git and hand the artifacts out.
+#
+#   guard → next → build → bump → { release, npm, pages }
+#
+# The order is the point. The version is stamped into the tree the build job
+# clones rather than committed ahead of it, so `main` never carries a bump for a
+# build that failed — and the artifacts still come out carrying the version that
+# is about to be tagged, which a bump made *after* the build could not manage.
+# `bump` pushes the commit and the tag once the build is green, and the three
+# jobs behind it consume the artifacts. `release` in particular needs the tag to
+# already exist.
+#
+# The one thing this shape cannot buy: npm's provenance attests GITHUB_SHA,
+# which is fixed when the run is dispatched, so it names the commit *before* the
+# bump. Closing that would mean pushing the tag first and letting it trigger a
+# second workflow — which is the trade this makes in the other direction.
+
 on:
-  push:
-    tags:
-      - 'v*'
   workflow_dispatch:
     inputs:
+      version:
+        description: 'Version bump to apply'
+        type: choice
+        options: [patch, minor, major]
+        default: patch
       dry-run:
-        description: 'Pack without publishing'
+        description: 'Build and pack without pushing, releasing or publishing'
         type: boolean
         default: true
 
 permissions:
   contents: read
 
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
 jobs:
+  # `workflow_dispatch` takes no branch filter — the workflow can be launched
+  # from any branch that carries this file — and a release built from a work
+  # branch would push a bump commit onto it.
+  guard:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Releases are cut from main
+        if: github.ref != 'refs/heads/main'
+        run: |
+          echo "refusing to release from ${{ github.ref }}" >&2
+          exit 1
+
+  next:
+    needs: [guard]
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.next.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+      # Resolves the keyword against package.json and nothing more — the tree it
+      # writes is thrown away with the runner. Everything downstream works from
+      # this output, so one keyword cannot resolve to two versions.
+      - id: next
+        run: |
+          version="$(npm version "${{ inputs.version }}" --no-git-tag-version)"
+          echo "version=${version#v}" >> "$GITHUB_OUTPUT"
+          echo "next version: ${version#v}"
+
+  build:
+    needs: [next]
+    uses: ./.github/workflows/build.yml
+    with:
+      version: ${{ needs.next.outputs.version }}
+
+  bump:
+    needs: [next, build]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - name: Commit and tag
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          node scripts/sync-version.mjs "${{ needs.next.outputs.version }}"
+          git add package.json package-lock.json src/celeste.manifest.ts
+          git commit -m "v${{ needs.next.outputs.version }}"
+          git tag "v${{ needs.next.outputs.version }}"
+      # Not a fast-forward if someone merged while the build ran, in which case
+      # this fails rather than overwriting them. Relaunching is the fix.
+      - name: Push
+        if: inputs.dry-run != true
+        run: git push --follow-tags
+
+  release:
+    needs: [next, build, bump]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: sdk-dist
+          path: dist
+      - uses: actions/download-artifact@v4
+        with:
+          name: everest-dist
+          path: dist/celeste
+      - uses: actions/download-artifact@v4
+        with:
+          name: runtime-dist
+          path: dist
+
+      # The runtime on its own, for hosts that point `options.runtimeBaseUrl` at
+      # it and supply the rest themselves. NOTICE.md rides along — a second -C
+      # switches directories mid-archive — because this is 130 MB of several
+      # third-party licences, one of them (FMOD) proprietary, and it is handed
+      # out with nothing else beside it.
+      - name: Pack the runtime
+        run: |
+          tar -caf celeste-runtime.tar.zst -C dist/celeste _framework runtime.json -C "$GITHUB_WORKSPACE" NOTICE.md
+          ls -la celeste-runtime.tar.zst
+
+      # The whole site, ready to drop on a static host: demo shell, SDK,
+      # everest.zip, the runtime, and the coi.js/_headers pair that gets COOP and
+      # COEP onto the page one way or the other. Packed under a top-level
+      # directory so neither archive sprays 199 MB into a cwd; ~103 MB each.
+      #
+      # Both formats because unzip is everywhere and tar keeps the permissions.
+      #
+      # NOTICE.md and LICENSE travel inside rather than only beside it: this
+      # carries _framework/ — several third-party licences at once, one of them
+      # (FMOD) proprietary — and an extracted copy of it that has been moved onto
+      # a host is exactly where a notice left behind on a Releases page stops
+      # doing its job.
+      - name: Pack the site
+        run: |
+          cp -R dist celeste-web
+          cp NOTICE.md LICENSE celeste-web/
+          tar -czf celeste-web.tar.gz celeste-web
+          zip -qr celeste-web.zip celeste-web
+          ls -la celeste-web.tar.gz celeste-web.zip
+
+      # Named explicitly: the run was dispatched from main, so there is no tag
+      # in github.ref for the action to infer one from.
+      - name: Attach artifacts to Release
+        if: inputs.dry-run != true
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v${{ needs.next.outputs.version }}
+          files: |
+            celeste-web.tar.gz
+            celeste-web.zip
+            celeste-runtime.tar.zst
+            dist/celeste/everest.zip
+            NOTICE.md
+
   npm:
+    needs: [build, bump]
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -23,34 +167,64 @@ jobs:
       # so there is no long-lived secret in the repository.
       id-token: write
     steps:
-      - uses: actions/checkout@v4
+      # No checkout. The tarball is self-contained — npm reads the manifest out
+      # of it — and the tree at GITHUB_SHA is the one from *before* the bump, so
+      # having it here would only invite confusion about which package.json is
+      # being published. setup-node is for the .npmrc it writes.
       - uses: actions/setup-node@v4
         with:
           node-version: 24
           registry-url: https://registry.npmjs.org
-          cache: npm
 
-      - name: Install dependencies
-        run: npm ci
+      # Packed by the `sdk` job from the tree it built and tested, version
+      # already stamped in. Only the SDK ships on npm; the runtime and the
+      # Everest build are Release assets — see NOTICE.md.
+      - uses: actions/download-artifact@v4
+        with:
+          name: npm-tarball
 
-      # Only the SDK ships on npm. The runtime and the Everest build are
-      # Release assets — see the `files` field in package.json and NOTICE.md.
-      - name: Build and test the SDK
-        run: make test
-
-      - name: Check the tag matches the version
-        if: startsWith(github.ref, 'refs/tags/')
-        run: |
-          tag="${GITHUB_REF_NAME#v}"
-          version="$(node -p 'require("./package.json").version')"
-          if [ "$tag" != "$version" ]; then
-            echo "tag $GITHUB_REF_NAME does not match package.json version $version" >&2
-            exit 1
-          fi
-
-      - name: Pack
-        run: npm pack --dry-run
+      # The real command minus the upload, so a dry run exercises everything
+      # that could reject the tarball rather than only that it packs.
+      - name: Check the tarball publishes
+        run: npm publish ./*.tgz --access public --dry-run
 
       - name: Publish
-        if: startsWith(github.ref, 'refs/tags/') && inputs.dry-run != true
-        run: npm publish --access public --provenance
+        if: inputs.dry-run != true
+        run: npm publish ./*.tgz --access public --provenance
+
+  pages:
+    needs: [build, bump]
+    if: inputs.dry-run != true
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deploy.outputs.page_url }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: sdk-dist
+          path: dist
+      - uses: actions/download-artifact@v4
+        with:
+          name: everest-dist
+          path: dist/celeste
+      - uses: actions/download-artifact@v4
+        with:
+          name: runtime-dist
+          path: dist
+      - uses: actions/configure-pages@v5
+        with:
+          enablement: true
+      # Pages cannot send COOP/COEP, and the runtime needs them. dist/coi.js
+      # installs a service worker that adds both from inside the browser, which
+      # is why the demo shell loads it before anything else.
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: dist
+      - id: deploy
+        uses: actions/deploy-pages@v4

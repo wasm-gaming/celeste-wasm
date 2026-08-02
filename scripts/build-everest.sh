@@ -118,6 +118,12 @@ pack() {
   # segment off every entry — the same shape the official artifact has.
   (cd "$STAGE_DIR" && zip -qr "${DIST_DIR}/everest.zip" main)
 
+  # The demo shell's favicon. Emitted beside the zip rather than committed to
+  # src/demo, so it stays what NOTICE.md says every piece of Everest here is:
+  # taken from the pinned checkout at build time, never vendored. MIT, © Everest
+  # Team — the same terms as everest.zip, and it travels with it.
+  cp "${STAGE_DIR}/main/Celeste-icon.png" "${DIST_DIR}/celeste-icon.png"
+
   node -e '
     const fs = require("fs");
     const [dest, repo, ref, build] = process.argv.slice(1);
