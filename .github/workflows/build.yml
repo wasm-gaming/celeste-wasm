@@ -4,6 +4,9 @@ name: Build
 # happens to them afterwards — Release assets, npm, Pages — belongs to
 # release.yml, which calls this workflow.
 on:
+  push:
+    branches:
+      - main
   pull_request:
   workflow_dispatch:
   workflow_call:
@@ -19,9 +22,13 @@ permissions:
   contents: read
 
 concurrency:
-  # Per ref, and only PRs get cancelled: a release build is doing work nothing
-  # else will redo, and the pushes behind it are minutes apart at most.
-  group: build-${{ github.ref }}
+  # `github.workflow` is the *caller's* name when this runs through
+  # workflow_call, so a release building main lands in its own group instead of
+  # queueing behind whatever the last push to main is still compiling.
+  #
+  # Only pull requests get cancelled. A release build is doing work nothing else
+  # will redo, and on main the pushes are minutes apart at most.
+  group: build-${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 env:
