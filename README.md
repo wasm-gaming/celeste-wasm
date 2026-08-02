@@ -58,6 +58,7 @@ const engine = await load({
   options: { installEverest: true },
   onProgress: (current, total) => { /* files staged */ },
   onSplash: (message, progress) => { /* Everest, loading mods; progress = {loaded,total,mod,done} */ },
+  onAchievement: (id) => { /* Steam achievement unlocked; kept in localStorage */ },
   onEvent: (e) => { /* ready | error | exit */ },
 });
 

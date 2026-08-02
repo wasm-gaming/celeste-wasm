@@ -323,20 +323,136 @@ export function parseSplashMessage(
   return { text: raw };
 }
 
+/** What the game has unlocked and counted, as this package keeps it. */
+export interface SteamProgress {
+  /** Achievement ids the game has unlocked, in the order it unlocked them. */
+  achievements: string[];
+  /** Steam stats, by name. Celeste keeps its own totals in the save file. */
+  stats: Record<string, number>;
+}
+
+/**
+ * Where that record lives, per storage namespace.
+ *
+ * `localStorage` rather than OPFS because the game asks for an achievement
+ * *synchronously* — `GetAchievement` returns a bool to managed code with no
+ * await in between — and OPFS cannot be read that way from the page.
+ */
+export function steamStorageKey(namespace: string): string {
+  return namespace ? `celeste-wasm:${namespace}:steam` : 'celeste-wasm:steam';
+}
+
+/** The page's `localStorage`, or null where reading it throws (sandboxed frames). */
+function pageStorage(): Pick<Storage, 'getItem' | 'setItem'> | null {
+  try {
+    return globalThis.localStorage ?? null;
+  } catch {
+    return null;
+  }
+}
+
+/** Read the record back, treating anything unexpected as "nothing yet". */
+export function readSteamProgress(
+  namespace: string,
+  storage: Pick<Storage, 'getItem'> | null = pageStorage(),
+): SteamProgress {
+  const empty: SteamProgress = { achievements: [], stats: {} };
+  if (!storage) return empty;
+
+  try {
+    const raw = storage.getItem(steamStorageKey(namespace));
+    if (!raw) return empty;
+    const parsed = JSON.parse(raw) as Partial<SteamProgress>;
+    return {
+      achievements: Array.isArray(parsed.achievements)
+        ? parsed.achievements.filter((id): id is string => typeof id === 'string')
+        : [],
+      stats: parsed.stats && typeof parsed.stats === 'object' ? { ...parsed.stats } : {},
+    };
+  } catch {
+    return empty;
+  }
+}
+
+/**
+ * Steam's stats and achievements, answered on the page.
+ *
+ * The loader is built against Steamworks.NET, so the game asks for these the
+ * way it does on the desktop — five functions a Steam client normally answers.
+ * There is no Steam client here, and an unregistered module is *fatal* to the
+ * runtime rather than merely unavailable: the first call the game makes aborts
+ * with "ES6 module SteamJS was not imported yet" and the session goes with it.
+ * Which is why this exists even though nothing it records leaves the browser.
+ *
+ * `NewQR` belongs to the Steam depot sign-in that this package does not do (see
+ * `encryptrsa` below) and is only reachable through `SteamJS.InitSteam`, which
+ * nothing here calls — it is answered so that the surface is complete.
+ */
+export function steamImports(options: {
+  /** Which record to use; matches the OPFS namespace the game is staged in. */
+  storageNamespace?: string;
+  onAchievement?: (achievement: string) => void;
+  /** Override for tests, and for a host that keeps this somewhere else. */
+  storage?: Pick<Storage, 'getItem' | 'setItem'> | null;
+}): Record<string, unknown> {
+  const namespace = options.storageNamespace ?? '';
+  const storage = options.storage === undefined ? pageStorage() : options.storage;
+
+  const progress = readSteamProgress(namespace, storage);
+
+  const save = (): void => {
+    try {
+      storage?.setItem(steamStorageKey(namespace), JSON.stringify(progress));
+    } catch {
+      // A full or disabled store costs the record, not the run.
+    }
+  };
+
+  return {
+    GetAchievement: (achievement: string): boolean => progress.achievements.includes(achievement),
+    SetAchievement: (achievement: string): void => {
+      if (progress.achievements.includes(achievement)) return;
+      progress.achievements.push(achievement);
+      save();
+      options.onAchievement?.(achievement);
+    },
+
+    // `GetStat` is typed `int` on the managed side, and a value that is not one
+    // aborts the runtime the same way a missing module does — so a record that
+    // has been edited or truncated reads as zero rather than as a crash.
+    GetStat: (stat: string): number => {
+      const value = progress.stats[stat];
+      return typeof value === 'number' && Number.isFinite(value) ? Math.trunc(value) : 0;
+    },
+    SetStat: (stat: string, value: number): void => {
+      progress.stats[stat] = value;
+      save();
+    },
+
+    NewQR: (): void => {},
+  };
+}
+
 /**
  * The functions the loader imports out of JavaScript.
  *
  * `JsSplash` is wired to Everest's own splash handler, so its messages are the
  * mod loader reporting progress — the host gets them as `onSplash`, parsed out
  * of the protocol above. `interop.js` covers two things Mono cannot do quickly
- * enough by itself.
+ * enough by itself, and `SteamJS` stands in for the Steam client.
  */
 export function hostImports(options: {
   onSplash?: (message: string | null, progress?: SplashProgress) => void;
+  onAchievement?: (achievement: string) => void;
+  storageNamespace?: string;
 }): Record<string, Record<string, unknown>> {
   const { onSplash } = options;
 
   return {
+    SteamJS: steamImports({
+      storageNamespace: options.storageNamespace,
+      onAchievement: options.onAchievement,
+    }),
     JsSplash: {
       StartSplash: () => onSplash?.(''),
       OnMessage: (message: string) => {

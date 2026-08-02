@@ -42,6 +42,7 @@ import {
   resolveStorageNamespace,
   runtimeFiles,
   splitWasmLoader,
+  steamStorageKey,
   type CelesteExports,
   type DotnetRuntimeAPI,
   type SplashProgress,
@@ -123,6 +124,14 @@ export type CelesteLoadConfig = EngineConfig & {
   onSplash?: (message: string | null, progress?: SplashProgress) => void;
   /** Managed heap size, sampled by the runtime every 30 seconds. */
   onMemory?: (megabytes: number) => void;
+  /**
+   * A Steam achievement the game just unlocked, by id.
+   *
+   * There is no Steam here, so the unlocked set is kept in the page's
+   * `localStorage` under the storage namespace and this is the only way a host
+   * hears about one — the game itself shows nothing.
+   */
+  onAchievement?: (achievement: string) => void;
   /** Used for the Everest updater, which may need a proxy. Defaults to `fetch`. */
   fetchImpl?: typeof fetch;
   /** Deprecated alias for `canvasEl`, kept for hosts written against 0.0.x. */
@@ -383,6 +392,15 @@ export async function purgeStorage(
     [...targets].map((path) => removePath(root, at(path, namespace))),
   );
   await removePath(root, at(STAGED_MANIFEST, namespace));
+
+  // The unlocked achievements are the one piece of game state that is not in
+  // OPFS — a synchronous import cannot read OPFS, so they sit in localStorage
+  // (see `steamImports`) — and "everything in storage" has to include them.
+  try {
+    globalThis.localStorage?.removeItem(steamStorageKey(namespace));
+  } catch {
+    // Same as never having had one.
+  }
 
   const settings = await removePath(root, at(SAVES_DIR, namespace));
   return { data: removed.some(Boolean), settings };
@@ -903,7 +921,11 @@ export async function load(config: CelesteLoadConfig): Promise<CelesteInstance> 
     : new URL('.', import.meta.url).href;
   const files = runtimeFiles(config.jsUrl ? new URL('../', config.jsUrl).href : baseUrl);
 
-  const imports = hostImports({ onSplash: config.onSplash });
+  const imports = hostImports({
+    onSplash: config.onSplash,
+    onAchievement: config.onAchievement,
+    storageNamespace: opts.storageNamespace,
+  });
 
   let runtime: DotnetRuntimeAPI | null = null;
   let exports: CelesteExports | null = null;
