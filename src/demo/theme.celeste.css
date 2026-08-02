@@ -133,6 +133,152 @@ body {
   font-weight: 600;
 }
 
+/* --- the preferences dialog ----------------------------------------------- */
+
+/* Square, and quiet until pointed at: the gear sits beside the isolation tag at
+ * the end of the bar, where nothing should compete with the status message. */
+/* `button.icon-button` rather than `.icon-button`, so the padding beats the
+ * bar's own button rule — same specificity, and this comes after it. */
+button.icon-button {
+  display: grid;
+  place-items: center;
+  width: 2rem;
+  height: 2rem;
+  padding: 0;
+  flex: none;
+  box-sizing: border-box;
+}
+
+.icon-button svg {
+  width: 1.15rem;
+  height: 1.15rem;
+  fill: currentColor;
+}
+
+.prefs {
+  width: min(30rem, calc(100vw - 2rem));
+  padding: 1.25rem;
+  border: 1px solid var(--demo-panel-border);
+  border-radius: var(--demo-panel-radius);
+  background: var(--demo-esc-card-bg);
+  color: var(--celeste-snow);
+  font-family: inherit;
+}
+
+.prefs::backdrop {
+  background: var(--demo-esc-bg);
+  backdrop-filter: blur(6px);
+}
+
+.prefs-head {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  margin-bottom: 0.5rem;
+}
+
+.prefs-head h2 {
+  flex: 1;
+  margin: 0;
+  font-size: 1rem;
+  font-weight: 700;
+  letter-spacing: 0.18em;
+  text-transform: uppercase;
+}
+
+.prefs-group {
+  padding: 0.9rem 0 0;
+  border-top: 1px solid var(--demo-panel-border);
+}
+
+.prefs-group h3 {
+  margin: 0 0 0.35rem;
+  font-size: 0.72rem;
+  font-weight: 700;
+  letter-spacing: 0.2em;
+  text-transform: uppercase;
+  color: var(--celeste-dash);
+}
+
+.prefs-group p {
+  margin: 0 0 0.75rem;
+  color: var(--celeste-mist);
+  font-size: 0.85rem;
+  line-height: 1.55;
+}
+
+.prefs-group p b {
+  color: var(--celeste-snow);
+  font-weight: 600;
+}
+
+.prefs-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  margin-bottom: 0.9rem;
+}
+
+/* Same shape as the bar's buttons — this dialog is the rest of that header. */
+.prefs button,
+.icon-button {
+  border-radius: 8px;
+  border: 1px solid rgba(var(--celeste-dash-rgb), 0.55);
+  background: rgba(var(--celeste-dash-rgb), 0.14);
+  color: var(--celeste-snow);
+  font: inherit;
+  font-size: 0.85rem;
+  cursor: pointer;
+  transition: background 150ms, border-color 150ms, color 150ms;
+}
+
+.prefs button:not(.icon-button) {
+  padding: 0.35rem 0.85rem;
+}
+
+.prefs button:hover,
+.icon-button:hover {
+  background: rgba(var(--celeste-dash-rgb), 0.26);
+  border-color: var(--celeste-dash);
+}
+
+.prefs button:disabled {
+  opacity: 0.45;
+  cursor: default;
+}
+
+/* Berry throughout, armed or not: this is the one control on the page that
+ * throws work away, and it should never read as one more blue button. */
+.prefs button.danger {
+  border-color: rgba(var(--celeste-berry-rgb), 0.55);
+  background: rgba(var(--celeste-berry-rgb), 0.14);
+  color: var(--celeste-berry);
+}
+
+.prefs button.danger:hover {
+  background: rgba(var(--celeste-berry-rgb), 0.26);
+  border-color: var(--celeste-berry);
+}
+
+.prefs button.danger.armed {
+  background: var(--celeste-berry);
+  border-color: var(--celeste-berry);
+  color: var(--celeste-night);
+  font-weight: 600;
+}
+
+.prefs-status {
+  margin: 0;
+  min-height: 1.2em;
+  color: var(--celeste-mist);
+  font-size: 0.85rem;
+  line-height: 1.5;
+}
+
+.prefs-status.bad {
+  color: var(--celeste-berry);
+}
+
 /* --- the stage ------------------------------------------------------------ */
 
 main {

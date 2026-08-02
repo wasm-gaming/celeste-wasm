@@ -29,16 +29,57 @@
     <span class="wordmark">CELESTE</span>
     <span class="badge">EVEREST</span>
     <button type="button" id="pick-folder" hidden>Use my Celeste folder…</button>
-    <!-- Saves live in OPFS, which is per browser and per origin. These are the
-         way back out of it, and the way in from another machine. -->
-    <button type="button" id="export-saves" hidden>Back up saves</button>
-    <button type="button" id="import-saves" hidden>Restore saves…</button>
-    <input type="file" id="saves-file" accept=".tar,.tar.gz,.tgz,.gz" hidden />
     <span class="install-status" role="status"></span>
     <span class="runtime-tag">page <b id="isolation">…</b></span>
+    <!-- Everything that acts on storage rather than on this session lives
+         behind this, so the bar keeps carrying only the one thing the player is
+         waiting on. -->
+    <button type="button" id="open-prefs" class="icon-button" title="Preferences" aria-label="Preferences">
+      <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+        <path
+          d="M12 15.5a3.5 3.5 0 1 0 0-7 3.5 3.5 0 0 0 0 7Zm7.4-2.5a7.6 7.6 0 0 0 0-2l2-1.6-2-3.4-2.4 1a7.6 7.6 0 0 0-1.7-1L15 3H9l-.3 2.6a7.6 7.6 0 0 0-1.7 1l-2.4-1-2 3.4L4.6 11a7.6 7.6 0 0 0 0 2l-2 1.6 2 3.4 2.4-1c.5.4 1.1.8 1.7 1L9 21h6l.3-2.6c.6-.2 1.2-.6 1.7-1l2.4 1 2-3.4-2-1.6Z"
+        />
+      </svg>
+    </button>
   </header>
 
   <main></main>
+
+  <!-- Saves live in OPFS, which is per browser and per origin. These are the
+       way back out of it, the way in from another machine, and the way to throw
+       the lot away. All three touch files the game holds open while it runs, so
+       the dialog is only ever reachable from the launcher — the header it opens
+       from is gone once the stage takes the page. -->
+  <dialog id="prefs" class="prefs">
+    <form method="dialog" class="prefs-head">
+      <h2>Preferences</h2>
+      <button type="submit" class="icon-button" title="Close" aria-label="Close">
+        <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+          <path d="M6.4 5 5 6.4 10.6 12 5 17.6 6.4 19 12 13.4 17.6 19 19 17.6 13.4 12 19 6.4 17.6 5 12 10.6 6.4 5Z" />
+        </svg>
+      </button>
+    </form>
+
+    <section class="prefs-group">
+      <h3>Saves</h3>
+      <p>Progress is kept in this browser, for this site only. Carry it off before you clear the site, or bring it in from another machine.</p>
+      <div class="prefs-actions">
+        <button type="button" id="export-saves">Back up saves</button>
+        <button type="button" id="import-saves">Restore saves…</button>
+      </div>
+      <input type="file" id="saves-file" accept=".tar,.tar.gz,.tgz,.gz" hidden />
+    </section>
+
+    <section class="prefs-group">
+      <h3>Storage</h3>
+      <p>Throws away the staged copy of Celeste <b>and your saves</b>. The next start has to copy your install again, which takes minutes. Back up your saves first.</p>
+      <div class="prefs-actions">
+        <button type="button" id="purge-storage" class="danger">Delete everything in storage</button>
+      </div>
+    </section>
+
+    <p class="prefs-status" role="status"></p>
+  </dialog>
 
   <!-- Publishes window.CELESTE for the wiring below. Module scripts run in
        document order, so this one has finished before the inline module. -->
@@ -69,6 +110,7 @@
       stagedInstall,
       exportSaves,
       importSaves,
+      purgeStorage,
       checkArchive,
       canPickDirectory,
     } = window.CELESTE
@@ -430,19 +472,40 @@
         return boot(e.attachTo, { assets: { game: archive }, fileName: e.fileName })
       })
 
+    // --- the preferences dialog ---------------------------------------------
+    //
+    // Everything in here acts on OPFS, which the game holds open while it runs.
+    // Nothing gates on that directly: the dialog opens from the header, and the
+    // header is gone from the moment the stage takes the page — so none of this
+    // can be pressed while Celeste is writing to a save, which is the one thing
+    // that would make an archive inconsistent.
+    const prefs = document.getElementById('prefs')
+    const prefsStatusEl = prefs.querySelector('.prefs-status')
+    const prefsButton = document.getElementById('open-prefs')
+
+    // Reported in the dialog rather than on the bar behind it, which the dialog
+    // is covering. The bar still gets it, for when the dialog is closed.
+    const setPrefsStatus = (text, bad = false) => {
+      prefsStatusEl.textContent = text
+      prefsStatusEl.classList.toggle('bad', bad)
+      setStatus(text, bad)
+    }
+
+    prefsButton.addEventListener('click', () => {
+      setPrefsStatus('')
+      prefs.showModal()
+    })
+
     // --- carrying the saves off the machine ---------------------------------
     //
     // OPFS is per browser and per origin, so progress made here is stranded
     // here unless something moves it. That is what a host syncing to a Drive
     // would use the SDK's archive functions for; this is the same pair of calls
     // with the network replaced by a download and a file picker.
-    //
-    // Both buttons live in the header, which goes away once the game is
-    // running — so neither can be pressed while Celeste is writing to a save,
-    // which is the one thing that would make an archive inconsistent.
     const exportButton = document.getElementById('export-saves')
     const importButton = document.getElementById('import-saves')
     const savesFile = document.getElementById('saves-file')
+    const purgeButton = document.getElementById('purge-storage')
 
     const download = (blob, name) => {
       const url = URL.createObjectURL(blob)
@@ -454,12 +517,9 @@
 
     const kb = (bytes) => `${(bytes / 1024).toFixed(1)} kB`
 
-    exportButton.hidden = false
-    importButton.hidden = false
-
     exportButton.addEventListener('click', async () => {
       exportButton.disabled = true
-      setStatus('Packing your saves…')
+      setPrefsStatus('Packing your saves…')
       try {
         // Buffered into a Blob because a download needs one and a save archive
         // is kilobytes. The SDK streams regardless — a host uploading this
@@ -467,9 +527,9 @@
         const archive = await new Response(await exportSaves()).blob()
         const stamp = new Date().toISOString().slice(0, 10)
         download(archive, `celeste-saves-${stamp}.tar.gz`)
-        setStatus(`Backed up ${kb(archive.size)} of saves.`)
+        setPrefsStatus(`Backed up ${kb(archive.size)} of saves.`)
       } catch (err) {
-        setStatus(err.message, true)
+        setPrefsStatus(err.message, true)
       } finally {
         exportButton.disabled = false
       }
@@ -484,19 +544,65 @@
       if (!file) return
 
       importButton.disabled = true
-      setStatus('Restoring saves…')
+      setPrefsStatus('Restoring saves…')
       try {
         const restored = await importSaves(file)
-        setStatus(
+        setPrefsStatus(
           restored === 0
             ? 'That archive had no saves in it.'
             : `Restored ${restored} file${restored === 1 ? '' : 's'}. Reload to play them.`,
           restored === 0,
         )
       } catch (err) {
-        setStatus(`That does not look like a save archive: ${err.message}`, true)
+        setPrefsStatus(`That does not look like a save archive: ${err.message}`, true)
       } finally {
         importButton.disabled = false
+      }
+    })
+
+    // --- throwing storage away ----------------------------------------------
+    //
+    // The staged install is minutes of work and the saves are the run, so this
+    // asks twice: the first press only arms the button. Closing the dialog
+    // disarms it, so an armed button never survives out of sight of the warning
+    // it belongs to.
+    let armed = false
+    const disarm = () => {
+      armed = false
+      purgeButton.classList.remove('armed')
+      purgeButton.textContent = 'Delete everything in storage'
+    }
+
+    prefs.addEventListener('close', disarm)
+
+    purgeButton.addEventListener('click', async () => {
+      if (!armed) {
+        armed = true
+        purgeButton.classList.add('armed')
+        purgeButton.textContent = 'Press again to delete it all'
+        setPrefsStatus('This cannot be undone — back up your saves first.', true)
+        return
+      }
+
+      disarm()
+      purgeButton.disabled = true
+      setPrefsStatus('Clearing storage…')
+      try {
+        const { data, settings } = await purgeStorage()
+        stagedReady = false
+        if (!data && !settings) {
+          setPrefsStatus('There was nothing in storage.')
+          return
+        }
+        // A reload rather than a message: Start, the launcher's slot and the
+        // storage probe below all took their state from a storage that no
+        // longer exists, and none of them can be talked out of it from here.
+        setPrefsStatus('Storage cleared — reloading…')
+        setTimeout(() => location.reload(), 600)
+      } catch (err) {
+        setPrefsStatus(err.message, true)
+      } finally {
+        purgeButton.disabled = false
       }
     })
 

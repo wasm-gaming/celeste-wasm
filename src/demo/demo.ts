@@ -32,6 +32,8 @@ declare global {
       exportSaves(): Promise<ReadableStream<Uint8Array>>;
       /** Put such an archive back. Returns how many files were written. */
       importSaves(archive: Blob): Promise<number>;
+      /** Drop the staged install *and* the saves. Says which of the two it found. */
+      purgeStorage(): Promise<{ data: boolean; settings: boolean }>;
       /** Run the same check over an archive, without unpacking it. */
       checkArchive(bytes: ArrayBuffer | Uint8Array | Blob): Promise<InstallCheck>;
       /** Whether this browser can hand over a directory at all. */
@@ -88,6 +90,7 @@ window.CELESTE = {
   stagedInstall: () => sdk.stagedInstall(),
   exportSaves: () => sdk.exportSaves(),
   importSaves: (archive) => sdk.importSaves(archive),
+  purgeStorage: () => sdk.purgeStorage(),
 
   async pickGameDirectory(): Promise<InstallCheck | null> {
     if (!showDirectoryPicker) {
