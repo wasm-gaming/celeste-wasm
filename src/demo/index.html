@@ -150,8 +150,9 @@
       }
     }
 
-    // Everything both routes share. `attachTo` is whichever stage element the
-    // caller cleared for it.
+    // Everything both routes share. `attachTo` is the stage element to take
+    // over — whatever a caller put there to say it was working is cleared here,
+    // because from this point the HUD is what reports progress.
     //
     // `main.running` is what takes the page over: the stage grows to the whole
     // viewport and the header goes away, so from here on the HUD is the only
@@ -160,6 +161,7 @@
     // just before the game reads its settings and picks the resolution there.
     const boot = async (stageEl, { assets = {}, gameDirectory, fileName }) => {
       mainEl.classList.add('running')
+      stageEl.replaceChildren()
       setStatus('Staging the game…')
 
       const hud = createStageHud(stageEl)
@@ -399,7 +401,25 @@
       // enables once a file is in its ROM slot — which is exactly why the
       // folder route above needed a trigger of its own.
       .on('launch', async (e) => {
-        const archive = await demo.loadToMEMFS('rom')
+        // The launcher has already cleared the stage for a game that has not
+        // started, so everything between here and boot()'s own HUD is a black
+        // rectangle. Short as that is now, it is the player's only clue.
+        showOnStage(e.attachTo, 'Reading your archive…')
+
+        // `getFile` rather than `loadToMEMFS`: that helper reads the whole slot
+        // into an ArrayBuffer, and a Celeste archive is ~1.3 GB — minutes of
+        // silence before staging even begins, and the thing resident in memory
+        // that celeste.zip.ts exists to avoid. The `File` is backed by disk, so
+        // the reader slices the central directory off it and staging hands the
+        // same blob to its worker by reference instead of copying it across.
+        const archive = demo.getFile('rom')
+        if (!archive) {
+          const reason = 'No archive in the slot — drop a zip of your Celeste folder first.'
+          setStatus(reason, true)
+          showOnStage(e.attachTo, reason)
+          throw new Error(reason)
+        }
+
         const check = await checkArchive(archive)
         if (!check.ok) {
           setStatus(check.reason, true)

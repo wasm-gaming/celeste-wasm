@@ -109,10 +109,14 @@ jobs:
         with:
           name: everest-dist
           path: dist/celeste
+      # Into dist/celeste, not dist: an artifact built from several paths is
+      # rooted at their least common ancestor, and both of runtime-dist's are
+      # under dist/celeste — so it unpacks as `_framework/` + `runtime.json`,
+      # already relative to the directory they belong in.
       - uses: actions/download-artifact@v4
         with:
           name: runtime-dist
-          path: dist
+          path: dist/celeste
 
       # The runtime on its own, for hosts that point `options.runtimeBaseUrl` at
       # it and supply the rest themselves. NOTICE.md rides along — a second -C
@@ -213,10 +217,34 @@ jobs:
         with:
           name: everest-dist
           path: dist/celeste
+      # Same as in `release` above: runtime-dist is rooted at dist/celeste, so
+      # unpacking it into dist/ is what put _framework/ at the top of the site
+      # and had the SDK asking for celeste/_framework/dotnet.js in vain.
       - uses: actions/download-artifact@v4
         with:
           name: runtime-dist
-          path: dist
+          path: dist/celeste
+      # Three artifacts assembled into one tree by path convention, and nothing
+      # up to here reads a single one of those paths — a misplaced download
+      # deploys green and 404s in the player's browser, which is how
+      # _framework/ ended up at the top of the site. These are the files the
+      # page actually asks for, by the URLs it asks for them at.
+      - name: Check the site is laid out the way the page loads it
+        run: |
+          set -e
+          for path in \
+            index.html \
+            coi.js \
+            celeste/celeste.sdk.js \
+            celeste/celeste.stage.worker.js \
+            celeste/everest.zip \
+            celeste/runtime.json \
+            celeste/_framework/dotnet.js
+          do
+            test -f "dist/$path" || { echo "missing: dist/$path"; exit 1; }
+          done
+          du -sh dist dist/celeste/_framework
+
       - uses: actions/configure-pages@v5
         with:
           enablement: true

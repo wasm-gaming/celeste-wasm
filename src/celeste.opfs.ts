@@ -15,6 +15,18 @@ import { ZipReader, type ZipEntry } from './celeste.zip.js';
 export const VFS_ROOT = '/libsdl';
 
 /**
+ * How many files staging has in flight at once.
+ *
+ * Every OPFS operation is an async round trip, and a Celeste install is ~1,240
+ * files — so a strictly sequential copy spends most of its wall clock waiting
+ * rather than moving bytes. Eight lanes is enough to keep the storage backend
+ * busy without putting eight large inflate streams on the heap at once; the
+ * streams are backpressured, so what is resident is a few chunks per lane and
+ * not a few files.
+ */
+export const STAGE_CONCURRENCY = 8;
+
+/**
  * Put a path inside the runtime's storage namespace.
  *
  * Upstream's loader has no namespace: it reads and writes absolute paths under
@@ -121,19 +133,139 @@ async function directoryOf(
   return handle;
 }
 
-/** Write a file, creating its parent directories. */
-export async function writeFile(
-  root: FileSystemDirectoryHandle,
-  path: string,
-  data: Uint8Array | ReadableStream<Uint8Array>,
-): Promise<void> {
-  const segments = splitPath(path);
-  const name = segments.pop();
-  if (!name) throw new Error(`celeste: "${path}" is not a file path`);
+/**
+ * `mkdir -p`, memoised, for the one caller that does it thousands of times.
+ *
+ * `writeFile` resolves a path from the root a segment at a time, and each of
+ * those segments is its own async round trip. Staging puts ~1,240 files into
+ * ~90 directories, so the unmemoised version re-resolves
+ * `Content/Graphics/Atlases` once per file inside it — thousands of round trips
+ * to reach handles that never change.
+ *
+ * The *promise* is what gets cached, not the handle: lanes running in parallel
+ * ask for the same directory at the same time, and caching the promise makes
+ * them share the one lookup instead of racing to create it.
+ */
+class DirectoryIndex {
+  private readonly cache = new Map<string, Promise<FileSystemDirectoryHandle>>();
 
-  const parent = await ensureDirectory(root, segments.join('/'));
-  const file = await parent.getFileHandle(name, { create: true });
-  const writable = await file.createWritable();
+  constructor(private readonly root: FileSystemDirectoryHandle) {}
+
+  directory(path: string): Promise<FileSystemDirectoryHandle> {
+    const key = splitPath(path).join('/');
+    if (!key) return Promise.resolve(this.root);
+
+    let pending = this.cache.get(key);
+    if (!pending) {
+      const at = key.lastIndexOf('/');
+      pending = this.directory(at < 0 ? '' : key.slice(0, at)).then((parent) =>
+        parent.getDirectoryHandle(key.slice(at + 1), { create: true }),
+      );
+      this.cache.set(key, pending);
+    }
+    return pending;
+  }
+
+  async file(path: string): Promise<FileSystemFileHandle> {
+    const segments = splitPath(path);
+    const name = segments.pop();
+    if (!name) throw new Error(`celeste: "${path}" is not a file path`);
+    const parent = await this.directory(segments.join('/'));
+    return parent.getFileHandle(name, { create: true });
+  }
+}
+
+/**
+ * `createSyncAccessHandle`, which lib.dom does not have because it only exists
+ * in a worker — the whole reason `celeste.stage.worker.ts` exists.
+ */
+interface SyncAccessHandle {
+  /**
+   * Narrower than the real signature, which takes any `BufferSource`. Every
+   * chunk reaching it here is a `Uint8Array`, and saying so avoids the
+   * SharedArrayBuffer mismatch `createWritable` runs into below.
+   */
+  write(data: Uint8Array, options?: { at?: number }): number;
+  truncate(size: number): void;
+  flush(): void;
+  close(): void;
+}
+
+type SyncCapableFileHandle = FileSystemFileHandle & {
+  createSyncAccessHandle?: () => Promise<SyncAccessHandle>;
+};
+
+/** Bytes, or a stream of them, produced only once the destination is open. */
+type Contents = Uint8Array | ReadableStream<Uint8Array>;
+
+async function drain(
+  contents: Contents,
+  onChunk: (chunk: Uint8Array) => void | Promise<void>,
+): Promise<void> {
+  if (contents instanceof Uint8Array) return void (await onChunk(contents));
+
+  const reader = contents.getReader();
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) return;
+    if (value) await onChunk(value);
+  }
+}
+
+/**
+ * Write to an already-resolved file handle, by whichever route this realm has.
+ *
+ * `createWritable` is the only one the main thread gets, and it is the slow
+ * one: Chrome writes through a temporary swap file and renames it into place on
+ * `close()`, so every file costs roughly twice the I/O plus a rename. In a
+ * worker the same handle also offers `createSyncAccessHandle`, which writes
+ * into the file itself — which is why staging tries to run there.
+ *
+ * `contents` is a thunk because the sync handle can refuse to open (the file is
+ * locked by another writer) and the fallback then has to ask for the bytes from
+ * the start. Producing them only after a destination is open keeps that honest:
+ * nothing is read until something is ready to receive it.
+ *
+ * The two routes differ in what a failure leaves behind: an unclosed writable
+ * discards its swap file and the original survives, while the sync handle has
+ * been writing into the file itself and leaves it short. That is the case
+ * `copyDirectoryInto` resumes from — a file at the wrong size is rewritten — so
+ * the difference costs a re-copy of one file rather than a corrupt install.
+ */
+async function writeContents(
+  handle: FileSystemFileHandle,
+  contents: () => Contents | Promise<Contents>,
+): Promise<void> {
+  const openSync = (handle as SyncCapableFileHandle).createSyncAccessHandle;
+  if (openSync) {
+    let access: SyncAccessHandle | null = null;
+    try {
+      access = await openSync.call(handle);
+    } catch {
+      // Locked, or not an OPFS file after all. The writable below works either
+      // way, so this is a slow path rather than a failure.
+    }
+
+    if (access) {
+      const sync = access;
+      try {
+        // The file may already hold a longer version of itself — a resumed copy
+        // reaches here precisely when what is there is the wrong length.
+        sync.truncate(0);
+        let at = 0;
+        await drain(await contents(), (chunk) => {
+          at += sync.write(chunk, { at });
+        });
+        sync.flush();
+      } finally {
+        sync.close();
+      }
+      return;
+    }
+  }
+
+  const writable = await handle.createWritable();
+  const data = await contents();
 
   if (data instanceof Uint8Array) {
     // A `Uint8Array` over a SharedArrayBuffer is still a valid write chunk;
@@ -146,6 +278,48 @@ export async function writeFile(
   // Piping keeps a 200 MB asset off the heap: it lands in storage a chunk at a
   // time, straight out of the inflate stream.
   await data.pipeTo(writable);
+}
+
+/** Write a file, creating its parent directories. */
+export async function writeFile(
+  root: FileSystemDirectoryHandle,
+  path: string,
+  data: Uint8Array | ReadableStream<Uint8Array>,
+): Promise<void> {
+  await writeContents(await new DirectoryIndex(root).file(path), () => data);
+}
+
+/**
+ * Run `task` over `items` with `limit` of them in flight.
+ *
+ * Lanes pull from a shared cursor rather than being handed a slice each, so one
+ * slow file does not leave a lane idle while another still has work queued. The
+ * first failure stops the rest: staging that has started failing has no reason
+ * to keep writing, and the error the caller sees should be the one that
+ * actually happened first.
+ */
+async function pooled<T>(
+  items: readonly T[],
+  limit: number,
+  task: (item: T) => Promise<void>,
+): Promise<void> {
+  let cursor = 0;
+  let failure: unknown = null;
+
+  const lane = async (): Promise<void> => {
+    for (let at = cursor++; at < items.length; at = cursor++) {
+      if (failure !== null) return;
+      try {
+        await task(items[at]!);
+      } catch (error) {
+        failure ??= error;
+        return;
+      }
+    }
+  };
+
+  await Promise.all(Array.from({ length: Math.min(limit, items.length) }, lane));
+  if (failure !== null) throw failure;
 }
 
 export async function readFile(
@@ -254,11 +428,11 @@ export async function removePath(root: FileSystemDirectoryHandle, path: string):
 }
 
 export interface StageProgress {
-  /** Entries written so far. */
+  /** Entries dealt with so far. Monotonic, but files finish out of order. */
   done: number;
   /** Entries to write in total. */
   total: number;
-  /** Path of the entry that was just written. */
+  /** Path of the entry that just finished. */
   path: string;
 }
 
@@ -272,11 +446,19 @@ export interface ExtractOptions {
   onProgress?: (progress: StageProgress) => void;
 }
 
+export interface CopyOptions {
+  /** Skip files for which this returns false. Paths are relative to the source. */
+  filter?: (path: string) => boolean;
+  onProgress?: (progress: StageProgress) => void;
+}
+
 /**
  * Unpack an archive into storage.
  *
- * Entries are written one at a time and streamed through the inflater, because
- * a Celeste install is ~1.3 GB and the browser will not hold it twice.
+ * Entries are streamed through the inflater rather than read into memory,
+ * because a Celeste install is ~1.3 GB and the browser will not hold it twice —
+ * and `STAGE_CONCURRENCY` of them at a time, because one at a time is latency
+ * bound long before it is bandwidth bound.
  */
 export async function extractInto(
   reader: ZipReader,
@@ -295,14 +477,18 @@ export async function extractInto(
     return filter ? filter(relative) : true;
   });
 
+  const index = new DirectoryIndex(root);
   let done = 0;
-  for (const entry of wanted) {
+
+  await pooled(wanted, STAGE_CONCURRENCY, async (entry) => {
     const relative = entry.name.slice(strip.length);
     const target = into ? `${into}/${relative}` : relative;
-    await writeFile(root, target, await reader.stream(entry));
+    await writeContents(await index.file(target), () => reader.stream(entry));
+    // Counted outside the call: optional chaining would skip the increment
+    // along with the callback, and `done` is this function's return value.
     done++;
     onProgress?.({ done, total: wanted.length, path: relative });
-  }
+  });
 
   return done;
 }
@@ -348,10 +534,13 @@ async function fileSizes(
   root: FileSystemDirectoryHandle,
   path: string,
 ): Promise<Map<string, number>> {
+  const found = await listFiles(root, path);
   const sizes = new Map<string, number>();
-  for (const { path: found, handle } of await listFiles(root, path)) {
-    sizes.set(found, (await handle.getFile()).size);
-  }
+  // `getFile()` is a round trip per file and there are ~1,240 of them on a
+  // resumed copy, which is the only time this finds anything at all.
+  await pooled(found, STAGE_CONCURRENCY, async ({ path: at, handle }) => {
+    sizes.set(at, (await handle.getFile()).size);
+  });
   return sizes;
 }
 
@@ -375,27 +564,81 @@ export async function copyDirectoryInto(
   source: FileSystemDirectoryHandle,
   root: FileSystemDirectoryHandle,
   into = '',
-  onProgress?: (progress: StageProgress) => void,
+  options: CopyOptions = {},
 ): Promise<number> {
-  const files = await listFiles(source);
+  const { filter, onProgress } = options;
+  const files = (await listFiles(source)).filter(({ path }) => (filter ? filter(path) : true));
 
   // One walk of the destination, rather than a lookup per file: on a fresh
   // install this finds nothing and costs nothing, and on a resumed one it is
   // what turns a thousand-odd writes into a thousand-odd map hits.
   const staged = await fileSizes(root, into);
 
+  const index = new DirectoryIndex(root);
   let done = 0;
   let written = 0;
-  for (const { path, handle } of files) {
+
+  await pooled(files, STAGE_CONCURRENCY, async ({ path, handle }) => {
     const file = await handle.getFile();
     if (staged.get(path) !== file.size) {
       const target = into ? `${into}/${path}` : path;
-      await writeFile(root, target, file.stream() as ReadableStream<Uint8Array>);
+      await writeContents(
+        await index.file(target),
+        () => file.stream() as ReadableStream<Uint8Array>,
+      );
       written++;
     }
     done++;
     onProgress?.({ done, total: files.length, path });
-  }
+  });
 
   return written;
+}
+
+// ------------------------------------------------------------- staging, once --
+
+/** Where an install is coming from. Both shapes survive `postMessage`. */
+export type StageSource =
+  | { kind: 'directory'; handle: FileSystemDirectoryHandle }
+  | {
+      kind: 'zip';
+      archive: Blob | Uint8Array;
+      /** The install root inside the archive, stripped off every entry. */
+      strip: string;
+    };
+
+export interface StageRequest {
+  root: FileSystemDirectoryHandle;
+  source: StageSource;
+  /** Write under this path inside `root` rather than at its top level. */
+  into?: string;
+  /**
+   * Relative paths starting with one of these are not written.
+   *
+   * Prefixes rather than a predicate because this request crosses a
+   * `postMessage` boundary, and a function does not.
+   */
+  skip?: readonly string[];
+}
+
+/**
+ * Get an install into storage. The single entry point both realms share.
+ *
+ * `celeste.stage.worker.ts` calls this with the request handed to it, and
+ * `stageWithWorker` calls it directly when there is no worker to be had — so
+ * the two routes differ only in where they run, never in what they do.
+ */
+export async function stageInto(
+  request: StageRequest,
+  onProgress?: (progress: StageProgress) => void,
+): Promise<number> {
+  const { root, source, into = '', skip = [] } = request;
+  const wanted = (path: string): boolean => !skip.some((prefix) => path.startsWith(prefix));
+
+  if (source.kind === 'directory') {
+    return copyDirectoryInto(source.handle, root, into, { filter: wanted, onProgress });
+  }
+
+  const reader = await ZipReader.open(source.archive);
+  return extractInto(reader, root, { into, strip: source.strip, filter: wanted, onProgress });
 }

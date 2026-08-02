@@ -5,7 +5,38 @@
 //
 // Not a .test.mjs, so the runner does not collect it.
 
-export const stats = { writes: 0 };
+export const stats = {
+  /** Files opened for writing, by either route. */
+  writes: 0,
+  /** Of those, the ones that went through a sync access handle. */
+  syncWrites: 0,
+  /** `getDirectoryHandle` calls, which is what the directory cache is about. */
+  directories: 0,
+  /** Writes open at this moment, and the most there have ever been at once. */
+  open: 0,
+  peakOpen: 0,
+  reset() {
+    this.writes = 0;
+    this.syncWrites = 0;
+    this.directories = 0;
+    this.open = 0;
+    this.peakOpen = 0;
+  },
+};
+
+/**
+ * Whether file handles offer `createSyncAccessHandle`.
+ *
+ * In a browser that answer is "only in a worker", which is the fork
+ * `writeContents` takes; here it is a switch, so both sides of it are covered.
+ */
+export const capabilities = { syncAccess: false };
+
+function opened() {
+  stats.writes++;
+  stats.open++;
+  stats.peakOpen = Math.max(stats.peakOpen, stats.open);
+}
 
 export class FakeFileHandle {
   kind = 'file';
@@ -19,8 +50,37 @@ export class FakeFileHandle {
     return new Blob([this.bytes]);
   }
 
+  get createSyncAccessHandle() {
+    if (!capabilities.syncAccess) return undefined;
+    return async () => {
+      opened();
+      stats.syncWrites++;
+      const handle = this;
+      let bytes = handle.bytes;
+
+      return {
+        truncate(size) {
+          bytes = bytes.subarray(0, size);
+          handle.bytes = bytes;
+        },
+        write(chunk, { at = 0 } = {}) {
+          const grown = new Uint8Array(Math.max(bytes.length, at + chunk.length));
+          grown.set(bytes);
+          grown.set(chunk, at);
+          bytes = grown;
+          handle.bytes = bytes;
+          return chunk.length;
+        },
+        flush() {},
+        close() {
+          stats.open--;
+        },
+      };
+    };
+  }
+
   async createWritable() {
-    stats.writes++;
+    opened();
     const chunks = [];
     const handle = this;
 
@@ -37,6 +97,7 @@ export class FakeFileHandle {
           at += chunk.length;
         }
         handle.bytes = out;
+        stats.open--;
       },
     });
 
@@ -71,6 +132,7 @@ export class FakeDirectoryHandle {
   }
 
   async getDirectoryHandle(name, { create = false } = {}) {
+    stats.directories++;
     const found = this.children.get(name);
     if (found) {
       if (found.kind !== 'directory') throw new Error(`${name} is a file`);

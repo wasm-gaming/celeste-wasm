@@ -9,7 +9,6 @@ import type {
 import { inspectInstall, REQUIRED_ENTRIES, type InstallCheck } from './celeste.install.js';
 import { manifest } from './celeste.manifest.js';
 import {
-  copyDirectoryInto,
   ensureDirectory,
   EVEREST_DIR,
   EVEREST_MARKER,
@@ -32,6 +31,7 @@ import {
   type StageProgress,
 } from './celeste.opfs.js';
 import { DEFAULT_CELESTE_OPTIONS, type CelesteOptions } from './celeste.options.js';
+import { stageWithWorker } from './celeste.stage.js';
 import {
   assemblyList,
   hostImports,
@@ -1223,19 +1223,26 @@ async function stageGame(
     );
   }
 
+  // Everest's backup of the vanilla game doubles the size of an install that
+  // was already patched once, and the browser patcher makes its own.
+  const skip = ['orig/'];
+
   if (supplied instanceof Uint8Array || supplied instanceof Blob) {
+    // Opened here only to read the listing — the staging worker opens its own
+    // over the same archive, which costs one read of the central directory.
     const reader = await ZipReader.open(supplied);
     const listing = inspectInstall(reader.entries.map((entry) => entry.name));
     if (opts.verifyInstall && !listing.ok) return listing;
 
-    // Everest's backup of the vanilla game doubles the size of an install that
-    // was already patched once, and the browser patcher makes its own.
-    await extractInto(reader, root, {
-      into: at(''),
-      strip: listing.root,
-      filter: (path) => !path.startsWith('orig/'),
-      onProgress: report,
-    });
+    await stageWithWorker(
+      {
+        root,
+        source: { kind: 'zip', archive: supplied, strip: listing.root },
+        into: at(''),
+        skip,
+      },
+      report,
+    );
     await recordStaged(root, before);
     return checkStaged(root);
   }
@@ -1250,10 +1257,16 @@ async function stageGame(
   const listing = inspectInstall(await listPaths(supplied));
   if (opts.verifyInstall && !listing.ok) return listing;
 
-  await copyDirectoryInto(
-    listing.root ? await descend(supplied, listing.root) : supplied,
-    root,
-    at(''),
+  await stageWithWorker(
+    {
+      root,
+      source: {
+        kind: 'directory',
+        handle: listing.root ? await descend(supplied, listing.root) : supplied,
+      },
+      into: at(''),
+      skip,
+    },
     report,
   );
   await recordStaged(root, before);

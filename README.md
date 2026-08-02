@@ -87,6 +87,18 @@ whole job:
 3. **Neither.** If storage already holds a valid install from a previous
    session, `load()` uses it. That is the common case on a reload.
 
+Either route is a thousand-odd files into OPFS, so how they are written matters
+as much as what is written. Staging runs in
+[src/celeste.stage.worker.ts](src/celeste.stage.worker.ts), because
+`createSyncAccessHandle` — which writes into the file itself — is exposed to
+workers only; on the main thread the sole option is `createWritable`, which
+Chrome implements as a swap file plus a rename, roughly twice the I/O per file.
+Files go `STAGE_CONCURRENCY` at a time, since one at a time is latency bound
+long before it is bandwidth bound, and parent directories are resolved once
+each rather than once per file. If the worker cannot be loaded — a bundler that
+did not emit it, a CSP that will not have it, a realm with no `Worker` — the
+same code runs on the calling thread instead.
+
 Ask before you offer, with `stagedInstall()`: it runs the same acceptance check
 over what is in storage, so a host can turn its Start button on after a refresh
 instead of sending the player back to the folder picker.
@@ -516,6 +528,7 @@ dist/
     everest.json         what was built, and from where
     runtime.json         which runtime revision was installed
     celeste.sdk.js       the compiled SDK, next to the runtime it loads
+    celeste.stage.worker.js  where staging runs, for the sync OPFS writes
   demo/                  the shared template, copied from @wasm-gaming/engine-specs
   index.html             the page shell that wires that template to this SDK
   theme.celeste.css      the mountain skin
