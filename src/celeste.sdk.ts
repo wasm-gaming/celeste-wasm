@@ -39,6 +39,7 @@ import {
   loadDotnetModule,
   readRuntimeDescriptor,
   resolveEverestBuild,
+  resolveStorageNamespace,
   runtimeFiles,
   splitWasmLoader,
   type CelesteExports,
@@ -142,11 +143,13 @@ let pageInstance: CelesteInstance | null = null;
  *
  * Page-scoped rather than passed around, for the same reason `pageInstance` is:
  * there is one runtime per page, it resolves its own paths, and every function
- * here that touches storage has to agree with it. `load()` sets it from
- * `options.storageNamespace` once it has checked the runtime understands it.
+ * here that touches storage has to agree with it. `load()` sets it from the
+ * runtime it booted — `options.storageNamespace` when the host named one, the
+ * runtime's own `runtime.json` when it did not.
  *
- * The standalone storage functions take an override, for a host that calls them
- * before `load()` has run.
+ * Until then it is the default, which is the stock root layout: the standalone
+ * storage functions run before any runtime has been asked. They take an
+ * override for a host that knows better.
  */
 let pageNamespace: string = DEFAULT_CELESTE_OPTIONS.storageNamespace;
 
@@ -849,15 +852,9 @@ export async function load(config: CelesteLoadConfig): Promise<CelesteInstance> 
   // ------------------------------------------------------- the storage layout
   //
   // Where the game lives in storage is settled by the *runtime*, not by
-  // preference: the loader resolves its own absolute paths. Only a runtime
-  // built from source here takes a namespace, so asking a stock one for a
-  // namespace would stage 1.1 GB somewhere it will never look — and the game
-  // would fail much later, saying only that Celeste was not found.
-  //
-  // The build records what it produced, so this is answerable before a byte
-  // moves. A runtime with no descriptor at all is trusted: a host serving
-  // `_framework/` from a CDN copy may not have the file, and refusing to boot
-  // over a missing metadata file would be worse than the mismatch it guards.
+  // preference, so the descriptor it was built with decides it and the option
+  // is only a claim to check against — see `resolveStorageNamespace`. Both
+  // happen here, before a byte moves.
 
   const baseUrlForRuntime = config.jsUrl ? new URL('../', config.jsUrl).href : null;
 
@@ -869,16 +866,11 @@ export async function load(config: CelesteLoadConfig): Promise<CelesteInstance> 
     fetchImpl,
   );
 
-  if (descriptor && (descriptor.storageNamespace ?? '') !== opts.storageNamespace) {
-    const has = descriptor.storageNamespace ?? '';
-    throw new Error(
-      `celeste: options.storageNamespace is ${JSON.stringify(opts.storageNamespace)}, but this runtime keeps the game ` +
-        (has
-          ? `under ${JSON.stringify(has)}.`
-          : 'at the root of the origin private filesystem — the stock loader does not take a namespace.') +
-        ` Set storageNamespace to ${JSON.stringify(has)}, or build a runtime with LOADER_NAMESPACE=${opts.storageNamespace || '-'} (make build-runtime-docker).`,
-    );
-  }
+  opts.storageNamespace = resolveStorageNamespace(
+    requested.storageNamespace,
+    descriptor,
+    DEFAULT_CELESTE_OPTIONS.storageNamespace,
+  );
 
   pageNamespace = opts.storageNamespace;
 

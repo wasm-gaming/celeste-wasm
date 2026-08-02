@@ -213,9 +213,13 @@ export interface CelesteOptions {
    *
    * A property of the *runtime build*, not a free choice: the loader resolves
    * its own paths, and only a runtime built from source here understands this.
-   * A downloaded runtime uses the mount root and needs `''`. `load()` reads
-   * `runtime.json` and refuses a mismatch rather than staging where the game
-   * will not look.
+   * A downloaded runtime uses the mount root, which is `''`.
+   *
+   * Leave it unset and `load()` takes it from the runtime's `runtime.json`;
+   * set it and `load()` refuses a runtime that disagrees, rather than staging
+   * where the game will not look. The default below is the fallback for a
+   * runtime that carries no descriptor, and what the storage functions use
+   * before `load()` has run.
    */
   storageNamespace?: string;
   /** Name of the archive the player picked, shown in host UI and logs. */
@@ -268,7 +272,7 @@ export const DEFAULT_CELESTE_OPTIONS: Required<
   pthreadPoolSize: 16,
   seamlessFrames: 5,
   installFileName: 'Celeste.zip',
-  storageNamespace: 'celeste',
+  storageNamespace: '',
 };
 
 function schemaForOption(option: CelesteOptionSpec): JSONSchema {
@@ -314,9 +318,9 @@ export const CELESTE_OPTIONS_SCHEMA: JSONSchema = {
     },
     storageNamespace: {
       type: 'string',
-      default: 'celeste',
+      default: '',
       description:
-        "Directory of the OPFS mount the game lives in, so other engines can share the origin. Only a runtime built from source understands it; a downloaded one needs ''. Checked against runtime.json at boot.",
+        "Directory of the OPFS mount the game lives in, so other engines can share the origin. Only a runtime built from source understands it; a downloaded one keeps the game at the mount root, which is ''. Left unset it is read from the runtime's runtime.json; set, it is checked against it at boot.",
     },
     installFileName: {
       type: 'string',

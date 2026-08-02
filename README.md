@@ -113,10 +113,11 @@ if ((await stagedInstall()).ok) {
 
 ### What Celeste occupies in OPFS
 
-Depends on the runtime. A **downloaded** one claims the root of it. A runtime
-**built from source here** puts everything under one directory
-(`options.storageNamespace`, `celeste` by default), which is what lets other
-engines share the origin.
+Depends on the runtime, and `load()` asks it rather than guessing. A
+**downloaded** one claims the root of it — which is what the default build, and
+this repository's own demo, run on. A runtime **built from source here** puts
+everything under one directory (`LOADER_NAMESPACE`, `celeste` unless you say
+otherwise), which is what lets other engines share the origin.
 
 The loader mounts the origin private filesystem at `/libsdl` and then reads and
 writes absolute paths under it — `/libsdl/Celeste.exe`, `/libsdl/Content`,
@@ -171,7 +172,7 @@ Two consequences worth planning around:
 `scripts/patch-loader-source.mjs` rewrites those literals during the source
 build, so the loader resolves them against a directory it is told about instead
 of against the mount. `MountFilesystems` gains a third argument, `load()` passes
-`options.storageNamespace`, and everything above moves one segment down:
+the namespace it resolved, and everything above moves one segment down:
 `celeste/Content`, `celeste/Celeste/Saves`, `celeste/staged.json`.
 
 It is a **pure prefix** of the stock layout rather than a flattening — which is
@@ -180,8 +181,15 @@ string. `LOADER_NAMESPACE=-` builds the stock layout back.
 
 The namespace belongs to the runtime, not to preference: the loader resolves its
 own paths, so asking a downloaded runtime for one would stage 1.1 GB where it
-will never look. The build records what it produced in `runtime.json` and
-`load()` refuses a mismatch before anything moves:
+will never look. The build records what it produced in `runtime.json`, and
+`load()` reads it before anything moves — so **`options.storageNamespace` is
+not something a host has to set**. Leave it alone and the layout follows the
+runtime you booted: root for a downloaded one, `celeste/` for a source build
+that was given that name.
+
+Setting it is for the host that has arranged its origin around one layout and
+wants to be told when it does not get it. That is the only case that refuses to
+boot:
 
 ```
 celeste: options.storageNamespace is "celeste", but this runtime keeps the game
@@ -192,7 +200,10 @@ LOADER_NAMESPACE=celeste (make build-runtime-docker).
 
 A runtime served from somewhere without a `runtime.json` is trusted rather than
 refused: a CDN copy of `_framework/` may not carry the file, and failing to boot
-over missing metadata would be worse than the mismatch it guards against.
+over missing metadata would be worse than the mismatch it guards against. With
+nothing set and nothing recorded the layout falls back to the root, which is
+what an unlabelled `_framework/` almost always is — every runtime this
+repository installs writes a descriptor beside it.
 
 ### Taking the saves somewhere else
 
@@ -347,7 +358,7 @@ Where the contract and a full desktop game do not line up exactly:
 | `pause()` / `resume()` | No-ops with a warning. FNA drives its own loop on the render worker and exposes no handle on it; Escape opens Celeste's pause menu, which is the real pause. |
 | `reset()` | **Throws.** There is one .NET runtime per page and the canvas has already been transferred to a worker, so a power cycle means a reload. The contract allows this, and a silent no-op would be worse. |
 | `setInput()` | No-op with a warning. The game ships a key-mapping screen and Everest adds its own. |
-| `purgeStorage()` | Drops the staged install, the patched assemblies and the Everest build (`data`), and Celeste's save directory (`settings`). Mods are kept. Removes what staging recorded rather than emptying the root, so a sibling engine on the same origin survives — see [What Celeste occupies in OPFS](#what-celeste-occupies-in-opfs). Also exported standalone, for hosts that want it before `load()`. The loader mounts one OPFS root per origin, so this ignores `storageNamespace`. |
+| `purgeStorage()` | Drops the staged install, the patched assemblies and the Everest build (`data`), and Celeste's save directory (`settings`). Mods are kept. Removes what staging recorded rather than emptying the root, so a sibling engine on the same origin survives — see [What Celeste occupies in OPFS](#what-celeste-occupies-in-opfs). Also exported standalone, for hosts that want it before `load()` — where the layout is not settled yet, so it clears the root unless passed a namespace. |
 | `saveState()` / `loadState()` | Not implemented; `capabilities.saveStates` is `false`. Celeste has its own save files. |
 | `load()` twice | Throws. The canvas cannot be transferred twice and the runtime cannot be unloaded. |
 

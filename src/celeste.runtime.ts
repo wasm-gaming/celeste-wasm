@@ -136,6 +136,43 @@ export async function readRuntimeDescriptor(
   }
 }
 
+/**
+ * Which OPFS layout to stage into, given what the host asked for and what the
+ * runtime says it was built with.
+ *
+ * The runtime has the final word — it resolves its own absolute paths, and a
+ * namespace it was not built with is 1.1 GB staged where it will never look. So
+ * a host that asked for nothing gets the runtime's answer, and a host that
+ * asked for something the runtime contradicts is stopped here rather than at
+ * "Celeste was not found" twenty minutes later.
+ *
+ * With no descriptor there is nothing to check against and the host's word, or
+ * the fallback, stands: an unlabelled `_framework/` is trusted rather than
+ * refused, because a CDN copy of one may simply not carry the file.
+ *
+ * @param requested What the host set, or `undefined` if it said nothing.
+ * @param descriptor The runtime's `runtime.json`, or `null` if it has none.
+ * @param fallback Layout to assume when neither has an opinion.
+ */
+export function resolveStorageNamespace(
+  requested: string | undefined,
+  descriptor: RuntimeDescriptor | null,
+  fallback = '',
+): string {
+  const runtime = descriptor?.storageNamespace ?? '';
+
+  if (requested === undefined) return descriptor ? runtime : fallback;
+  if (!descriptor || runtime === requested) return requested;
+
+  throw new Error(
+    `celeste: options.storageNamespace is ${JSON.stringify(requested)}, but this runtime keeps the game ` +
+      (runtime
+        ? `under ${JSON.stringify(runtime)}.`
+        : 'at the root of the origin private filesystem — the stock loader does not take a namespace.') +
+      ` Set storageNamespace to ${JSON.stringify(runtime)}, or build a runtime with LOADER_NAMESPACE=${requested || '-'} (make build-runtime-docker).`,
+  );
+}
+
 export interface RuntimeFiles {
   /** Directory holding `_framework/`, with a trailing slash. */
   root: string;
