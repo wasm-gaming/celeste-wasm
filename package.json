@@ -1,6 +1,6 @@
 {
   "name": "@wasm-gaming/celeste-wasm",
-  "version": "0.1.5",
+  "version": "0.1.6",
   "description": "Celeste + the Everest mod loader running on the .NET WebAssembly runtime, with a JS SDK conforming to the wasm-gaming engine contract.",
   "repository": {
     "type": "git",

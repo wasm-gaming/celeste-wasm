@@ -4,7 +4,7 @@ import { EVEREST_ZIP, VFS_ROOT } from './celeste.opfs.js';
 
 export const manifest: EngineManifest = {
   id: 'celeste',
-  version: '0.1.5',
+  version: '0.1.6',
   name: 'Celeste + Everest (WebAssembly)',
   description:
     "Celeste (2018) on the .NET WebAssembly runtime, with the Everest mod loader patched in by MonoMod in the browser. Ships none of the game: the player supplies the Celeste installation they already own, it is staged into the origin private filesystem, and it never leaves their machine.",
