@@ -8,8 +8,8 @@ set -euo pipefail
 #
 # The default `make build-runtime` downloads the pinned prebuilt bundle, which
 # is what almost everyone wants. This is the other path: it clones
-# MercuryWorkshop/celeste-wasm, builds the loader against a patched emsdk and a
-# patched .NET runtime pack, and installs the result the same way.
+# MercuryWorkshop/celeste-wasm, builds the loader against the prebuilt emsdk and
+# runtime pack it downloads into `statics/`, and installs the result the same way.
 #
 # You need this when you are changing the loader itself — the game's paths in
 # storage are string literals inside CelesteLoader.dll, so moving them (to
@@ -69,6 +69,7 @@ docker run --rm \
   -e RUNTIME_REF \
   -e RUNTIME_REV \
   -e RUNTIME_SOURCE=1 \
+  -e LOADER_NAMESPACE \
   "$IMAGE" build-runtime
 
 echo "[celeste] artifacts available in ${PROJECT_DIR}/dist/celeste/_framework"

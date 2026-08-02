@@ -14,6 +14,25 @@ import { ZipReader, type ZipEntry } from './celeste.zip.js';
 /** Where the loader mounts OPFS. Paths below are relative to this. */
 export const VFS_ROOT = '/libsdl';
 
+/**
+ * Put a path inside the runtime's storage namespace.
+ *
+ * Upstream's loader has no namespace: it reads and writes absolute paths under
+ * the mount, and the mount is the origin's OPFS root, so Celeste claims
+ * top-level names for the whole origin. A runtime built from source here is
+ * patched to take one (`scripts/patch-loader-source.mjs`), and it is a *pure
+ * prefix* of the layout without it — so everything this package knows about
+ * storage stays a single set of constants, and this is the only place the
+ * difference shows up.
+ *
+ * An empty namespace is the stock layout, which is what a downloaded runtime
+ * has.
+ */
+export function inNamespace(namespace: string, path: string): string {
+  if (!namespace) return path;
+  return path ? `${namespace}/${path}` : namespace;
+}
+
 /** The Everest build, read by `Patcher.ExtractEverest()`. */
 export const EVEREST_ZIP = 'everest.zip';
 

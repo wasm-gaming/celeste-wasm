@@ -208,6 +208,16 @@ export interface CelesteOptions {
   seamlessFrames?: number;
   /** Where the runtime lives: the directory that contains `_framework/`. Defaults to this package's dist/celeste/. */
   runtimeBaseUrl?: string;
+  /**
+   * Directory of the OPFS mount the game lives in.
+   *
+   * A property of the *runtime build*, not a free choice: the loader resolves
+   * its own paths, and only a runtime built from source here understands this.
+   * A downloaded runtime uses the mount root and needs `''`. `load()` reads
+   * `runtime.json` and refuses a mismatch rather than staging where the game
+   * will not look.
+   */
+  storageNamespace?: string;
   /** Name of the archive the player picked, shown in host UI and logs. */
   installFileName?: string;
   /** Alias for `installFileName`, for hosts that report the picked name here. */
@@ -237,6 +247,7 @@ export const DEFAULT_CELESTE_OPTIONS: Required<
     | 'pthreadPoolSize'
     | 'seamlessFrames'
     | 'installFileName'
+    | 'storageNamespace'
   >
 > = {
   fit: 'container',
@@ -257,6 +268,7 @@ export const DEFAULT_CELESTE_OPTIONS: Required<
   pthreadPoolSize: 16,
   seamlessFrames: 5,
   installFileName: 'Celeste.zip',
+  storageNamespace: 'celeste',
 };
 
 function schemaForOption(option: CelesteOptionSpec): JSONSchema {
@@ -299,6 +311,12 @@ export const CELESTE_OPTIONS_SCHEMA: JSONSchema = {
       type: 'string',
       description:
         'Directory holding the runtime — the one with _framework/ inside it. Defaults to the dist/celeste/ folder shipped next to this SDK.',
+    },
+    storageNamespace: {
+      type: 'string',
+      default: 'celeste',
+      description:
+        "Directory of the OPFS mount the game lives in, so other engines can share the origin. Only a runtime built from source understands it; a downloaded one needs ''. Checked against runtime.json at boot.",
     },
     installFileName: {
       type: 'string',

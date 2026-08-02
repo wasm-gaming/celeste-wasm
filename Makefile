@@ -49,11 +49,18 @@ RUNTIME_REPO ?= https://github.com/MercuryWorkshop/celeste-wasm
 RUNTIME_REF  ?= latest
 RUNTIME_REV  ?= 70ab8ae24e0ea9f06bc9c9248278038a89cd2a59
 
+# Directory of the OPFS mount the loader keeps the game in. Upstream has no such
+# directory — it uses the mount root, which is the origin's OPFS root, so Celeste
+# claims top-level names for the whole origin. The source build patches that in
+# (scripts/patch-loader-source.mjs); a downloaded runtime is unaffected.
+# `-` reproduces upstream's root-level layout.
+LOADER_NAMESPACE ?= celeste
+
 # Shared demo template shipped by the engine contract package; this repo only
 # adds index.html + theme.celeste.css on top of it.
 SPECS_DEMO := node_modules/@wasm-gaming/engine-specs/demo
 
-export UPSTREAM_REPO UPSTREAM_REF EVEREST_BUILD RUNTIME_REPO RUNTIME_REF RUNTIME_REV
+export UPSTREAM_REPO UPSTREAM_REF EVEREST_BUILD RUNTIME_REPO RUNTIME_REF RUNTIME_REV LOADER_NAMESPACE
 
 .PHONY: build build-sdk build-lib build-manifest build-demo build-wasm \
 	build-runtime build-everest build-wasm-docker build-everest-docker \

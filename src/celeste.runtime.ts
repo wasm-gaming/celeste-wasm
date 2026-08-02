@@ -9,7 +9,7 @@
 //
 // The three exported classes it drives:
 //
-//   CelesteBootstrap.MountFilesystems(root, dlls)  mount OPFS at /libsdl
+//   CelesteBootstrap.MountFilesystems(root, dlls, ns)  mount OPFS at /libsdl
 //   Patcher.ExtractEverest() / PatchCeleste(bool)  MonoMod over the player's copy
 //   CelesteLoader.PreInit/Init/RunOneFrame/MainLoop/Cleanup   the game itself
 
@@ -58,7 +58,13 @@ export interface DotnetHostBuilder {
 /** The `[JSExport]`s the loader publishes, as seen from JavaScript. */
 export interface CelesteExports {
   CelesteBootstrap: {
-    MountFilesystems(root: string, dlls: string[]): Promise<void>;
+    /**
+     * `storageNamespace` exists only on a runtime built from source here — the
+     * stock loader resolves its paths against the mount root. `load()` checks
+     * `runtime.json` before passing one, so a mismatch is an error rather than
+     * a game that stages where it will not look.
+     */
+    MountFilesystems(root: string, dlls: string[], storageNamespace?: string): Promise<void>;
   };
   Patcher: {
     /** Unpack /libsdl/everest.zip into /libsdl/Celeste/Everest/. */
@@ -94,6 +100,41 @@ export const JITERPRETER_OPTIONS: readonly string[] = [
   '--jiterpreter-wasm-bytes-limit=67108864',
   '--jiterpreter-table-size=32768',
 ];
+
+/**
+ * `runtime.json`, written beside `_framework/` by scripts/build-celeste-runtime.sh.
+ *
+ * Provenance, and — since the loader can now be built with its storage under a
+ * namespace — the one place a host can find out which layout the runtime it is
+ * about to boot expects.
+ */
+export interface RuntimeDescriptor {
+  repository?: string;
+  revision?: string | null;
+  builtFromSource?: boolean;
+  /** Namespace the loader was built with; null or absent means the mount root. */
+  storageNamespace?: string | null;
+}
+
+/**
+ * Read it, tolerating its absence.
+ *
+ * A host may serve `_framework/` from somewhere that never had the file — a CDN
+ * copy, an older release — so this answers `null` rather than failing, and the
+ * caller decides what an unknown layout means.
+ */
+export async function readRuntimeDescriptor(
+  baseUrl: string,
+  fetchImpl: typeof fetch = fetch,
+): Promise<RuntimeDescriptor | null> {
+  try {
+    const response = await fetchImpl(new URL('runtime.json', baseUrl).href);
+    if (!response.ok) return null;
+    return (await response.json()) as RuntimeDescriptor;
+  } catch {
+    return null;
+  }
+}
 
 export interface RuntimeFiles {
   /** Directory holding `_framework/`, with a trailing slash. */

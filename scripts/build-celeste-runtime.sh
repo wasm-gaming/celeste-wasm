@@ -94,13 +94,23 @@ build_runtime() {
     git clone --recursive "$RUNTIME_REPO" "$SRC_DIR"
   fi
 
+  # --force always, not only when a revision is pinned: the patch below rewrites
+  # tracked files, and a second run has to start from a clean tree or its anchors
+  # are already gone.
   if [[ -n "$RUNTIME_REV" ]]; then
     log "checking out ${RUNTIME_REV}"
     git -C "$SRC_DIR" fetch origin
     git -C "$SRC_DIR" checkout --quiet --force --detach "$RUNTIME_REV"
+  else
+    log "resetting the checkout"
+    git -C "$SRC_DIR" checkout --quiet --force HEAD
   fi
+  git -C "$SRC_DIR" clean -qfd -- loader patcher
 
-  log "building the loader (this takes about an hour on a cold cache)"
+  log "namespacing storage under ${LOADER_NAMESPACE:-celeste}/"
+  node "${PROJECT_DIR}/scripts/patch-loader-source.mjs" "$SRC_DIR"
+
+  log "building the loader (~30 min emulated on arm64, less on x86-64; longer on a cold cache)"
   (cd "${SRC_DIR}/loader" && dotnet workload restore)
   make -C "$SRC_DIR" publish
 
@@ -137,13 +147,14 @@ main() {
   # from the artifact alone.
   node -e '
     const fs = require("fs");
-    const [dest, repo, ref, rev, source] = process.argv.slice(1);
+    const [dest, repo, ref, rev, source, ns] = process.argv.slice(1);
     fs.writeFileSync(dest, JSON.stringify({
       repository: repo, ref, revision: rev || null,
       builtFromSource: source === "1",
+      storageNamespace: source === "1" ? (ns || null) : null,
       installedAt: new Date().toISOString(),
     }, null, 2) + "\n");
-  ' "${DIST_DIR}/runtime.json" "$RUNTIME_REPO" "$RUNTIME_REF" "$RUNTIME_REV" "$RUNTIME_SOURCE"
+  ' "${DIST_DIR}/runtime.json" "$RUNTIME_REPO" "$RUNTIME_REF" "$RUNTIME_REV" "$RUNTIME_SOURCE" "${LOADER_NAMESPACE:-}"
 
   node "${PROJECT_DIR}/scripts/verify-runtime.mjs" "${DIST_DIR}/_framework"
 

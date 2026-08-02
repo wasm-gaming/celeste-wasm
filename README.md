@@ -38,9 +38,10 @@ MonoMod's detour engine to work under WebAssembly at all is
 [MercuryWorkshop](https://github.com/MercuryWorkshop/celeste-wasm) and
 [r58Playz](https://github.com/r58Playz/FNA-WASM-Build), and `make build-runtime`
 takes their pinned build the way an engine package takes an export template —
-by revision, recorded in `dist/celeste/runtime.json`. `RUNTIME_SOURCE=1` builds
-it from source instead, which needs a patched emsdk, a patched .NET runtime pack
-and about an hour.
+by revision, recorded in `dist/celeste/runtime.json`. It can also be built from
+source, in a container (`make build-runtime-docker`) or in CI (the
+[Runtime (from source)](.github/workflows/runtime-source.yml) workflow); see
+[Building the runtime from source](#building-the-runtime-from-source).
 
 What this repository adds on top is the packaging: the engine contract, the
 staging path from a player's install into the runtime's filesystem, the install
@@ -100,16 +101,20 @@ if ((await stagedInstall()).ok) {
 
 ### What Celeste occupies in OPFS
 
-Short version: **the root of it**. There is no `celeste/` namespace to stay out
-of, and a host putting other engines on the same origin has to plan around that.
+Depends on the runtime. A **downloaded** one claims the root of it. A runtime
+**built from source here** puts everything under one directory
+(`options.storageNamespace`, `celeste` by default), which is what lets other
+engines share the origin.
 
 The loader mounts the origin private filesystem at `/libsdl` and then reads and
 writes absolute paths under it — `/libsdl/Celeste.exe`, `/libsdl/Content`,
 `/libsdl/CustomCeleste.dll` and the rest are string literals inside
 `CelesteLoader.dll`. Since the mount *is* the origin's root, those literals are
-top-level OPFS entries, and nothing in the SDK can move them.
+top-level OPFS entries — and being literals, no option can move them. Only
+rebuilding the loader can, which is what the source build does below.
 
-What lands there falls into two groups.
+Either way the tree is the same shape; a namespace only puts it one segment
+deeper. What lands in it falls into two groups.
 
 **This package's own, and a closed set:**
 
@@ -133,10 +138,11 @@ whatever the player's Celeste directory contains.
 
 Two consequences worth planning around:
 
-- **A sibling engine on the same origin needs a prefix, and a distinctive one.**
-  Not because the names above are likely to collide — because the open set makes
-  "avoid Celeste's names" unverifiable. A prefix like `snes/` is fine; a bare
-  `Content/` or `System.dll` is not.
+- **On a downloaded runtime, a sibling engine needs a distinctive prefix of its
+  own.** Not because the names above are likely to collide — because the open
+  set makes "avoid Celeste's names" unverifiable. `snes/` is fine; a bare
+  `Content/` or `System.dll` is not. A namespaced runtime removes the problem
+  instead of managing it.
 - **`purgeStorage()` removes the open set too, without emptying the root.**
   Staging records the top-level names it created in `Celeste/staged.json`, so a
   purge can drop the player's `FNA.dll` and `mscorlib.dll` — which no fixed list
@@ -148,8 +154,33 @@ Two consequences worth planning around:
   back to the fixed list, leaving the stray assemblies behind as it always did.
   Re-staging writes a manifest and the next purge is complete.
 
-Real isolation means moving those literals, which means rebuilding the managed
-loader — out of scope for this package, and tracked upstream.
+#### Getting a namespace
+
+`scripts/patch-loader-source.mjs` rewrites those literals during the source
+build, so the loader resolves them against a directory it is told about instead
+of against the mount. `MountFilesystems` gains a third argument, `load()` passes
+`options.storageNamespace`, and everything above moves one segment down:
+`celeste/Content`, `celeste/Celeste/Saves`, `celeste/staged.json`.
+
+It is a **pure prefix** of the stock layout rather than a flattening — which is
+why nothing else in this package needs a second code path, only a different
+string. `LOADER_NAMESPACE=-` builds the stock layout back.
+
+The namespace belongs to the runtime, not to preference: the loader resolves its
+own paths, so asking a downloaded runtime for one would stage 1.1 GB where it
+will never look. The build records what it produced in `runtime.json` and
+`load()` refuses a mismatch before anything moves:
+
+```
+celeste: options.storageNamespace is "celeste", but this runtime keeps the game
+at the root of the origin private filesystem — the stock loader does not take a
+namespace. Set storageNamespace to "", or build a runtime with
+LOADER_NAMESPACE=celeste (make build-runtime-docker).
+```
+
+A runtime served from somewhere without a `runtime.json` is trusted rather than
+refused: a CDN copy of `_framework/` may not carry the file, and failing to boot
+over missing metadata would be worse than the mismatch it guards against.
 
 ### Taking the saves somewhere else
 

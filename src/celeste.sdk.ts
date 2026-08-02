@@ -16,6 +16,7 @@ import {
   EVEREST_ZIP,
   exists,
   extractInto,
+  inNamespace,
   listFiles,
   listPaths,
   MODS_DIR,
@@ -36,6 +37,7 @@ import {
   hostImports,
   JITERPRETER_OPTIONS,
   loadDotnetModule,
+  readRuntimeDescriptor,
   resolveEverestBuild,
   runtimeFiles,
   splitWasmLoader,
@@ -136,6 +138,24 @@ export type CelesteLoadConfig = EngineConfig & {
 let pageInstance: CelesteInstance | null = null;
 
 /**
+ * The directory of the OPFS mount this page's runtime keeps the game in.
+ *
+ * Page-scoped rather than passed around, for the same reason `pageInstance` is:
+ * there is one runtime per page, it resolves its own paths, and every function
+ * here that touches storage has to agree with it. `load()` sets it from
+ * `options.storageNamespace` once it has checked the runtime understands it.
+ *
+ * The standalone storage functions take an override, for a host that calls them
+ * before `load()` has run.
+ */
+let pageNamespace: string = DEFAULT_CELESTE_OPTIONS.storageNamespace;
+
+/** A storage path inside the active namespace. */
+function at(path: string, namespace: string = pageNamespace): string {
+  return inNamespace(namespace, path);
+}
+
+/**
  * How deep the install check can see, in path segments.
  *
  * Nothing past the longest path it asks about tells it anything, and the walk
@@ -151,8 +171,13 @@ const INSTALL_CHECK_DEPTH = Math.max(...REQUIRED_ENTRIES.map((entry) => entry.sp
  * came in through, `Celeste.exe` lands at the top and the check has no question
  * that a deeper entry could answer.
  */
-async function checkStaged(root: FileSystemDirectoryHandle): Promise<InstallCheck> {
-  return inspectInstall(await listPaths(root, '', { depth: INSTALL_CHECK_DEPTH }));
+async function checkStaged(
+  root: FileSystemDirectoryHandle,
+  namespace: string = pageNamespace,
+): Promise<InstallCheck> {
+  return inspectInstall(
+    await listPaths(root, at('', namespace), { depth: INSTALL_CHECK_DEPTH }),
+  );
 }
 
 /**
@@ -166,8 +191,8 @@ async function checkStaged(root: FileSystemDirectoryHandle): Promise<InstallChec
  * The check is the same one the boot path runs. Throws where there is no
  * origin private filesystem, which is a browser that cannot run the game either.
  */
-export async function stagedInstall(): Promise<InstallCheck> {
-  return checkStaged(await opfsRoot());
+export async function stagedInstall(namespace?: string): Promise<InstallCheck> {
+  return checkStaged(await opfsRoot(), namespace ?? pageNamespace);
 }
 
 // ----------------------------------------------------------------- the saves
@@ -186,6 +211,8 @@ function bytePipe(pair: CompressionStream | DecompressionStream): ReadableWritab
 }
 
 export interface ExportOptions {
+  /** Storage namespace to read from. Defaults to the page's. */
+  namespace?: string;
   /**
    * Compress the archive. Celeste's saves are YAML and shrink by a lot, and the
    * whole point of the archive is that it crosses a network, so this is on.
@@ -212,7 +239,7 @@ export interface ExportOptions {
 export async function exportSaves(options: ExportOptions = {}): Promise<ReadableStream<Uint8Array>> {
   const { gzip = true } = options;
 
-  const files = await listFiles(await opfsRoot(), SAVES_DIR);
+  const files = await listFiles(await opfsRoot(), at(SAVES_DIR, options.namespace ?? pageNamespace));
   const archive = tarStream(
     (async function* (): AsyncGenerator<TarSource> {
       for (const { path, handle } of files) {
@@ -252,6 +279,7 @@ export async function exportSaves(options: ExportOptions = {}): Promise<Readable
  */
 export async function importSaves(
   archive: ReadableStream<Uint8Array> | Blob | Uint8Array,
+  namespace: string = pageNamespace,
 ): Promise<number> {
   const root = await opfsRoot();
 
@@ -259,7 +287,7 @@ export async function importSaves(
   for await (const entry of readTar(await inflateIfGzipped(toStream(archive)))) {
     // `readTar` has already refused anything that climbs out of the archive,
     // which matters here: this writes into a directory the game reads.
-    await writeFile(root, `${SAVES_DIR}/${entry.path}`, entry.body);
+    await writeFile(root, `${at(SAVES_DIR, namespace)}/${entry.path}`, entry.body);
     restored++;
   }
   return restored;
@@ -268,13 +296,19 @@ export async function importSaves(
 // --------------------------------------------------------------- the manifest
 
 /** Top-level names present in storage right now. */
-async function rootEntries(root: FileSystemDirectoryHandle): Promise<string[]> {
-  return listPaths(root, '', { depth: 1 });
+async function rootEntries(
+  root: FileSystemDirectoryHandle,
+  namespace: string = pageNamespace,
+): Promise<string[]> {
+  return listPaths(root, at('', namespace), { depth: 1 });
 }
 
 /** The names this package has claimed at the root, or null if it never recorded any. */
-async function readStaged(root: FileSystemDirectoryHandle): Promise<string[] | null> {
-  const raw = await readFile(root, STAGED_MANIFEST);
+async function readStaged(
+  root: FileSystemDirectoryHandle,
+  namespace: string = pageNamespace,
+): Promise<string[] | null> {
+  const raw = await readFile(root, at(STAGED_MANIFEST, namespace));
   if (!raw) return null;
   try {
     const parsed = JSON.parse(new TextDecoder().decode(raw)) as { entries?: unknown };
@@ -295,16 +329,20 @@ async function readStaged(root: FileSystemDirectoryHandle): Promise<string[] | n
  * previous record, because a second staging adds to storage rather than
  * replacing it.
  */
-async function recordStaged(root: FileSystemDirectoryHandle, before: string[]): Promise<void> {
-  const added = (await rootEntries(root)).filter((name) => !before.includes(name));
-  const known = (await readStaged(root)) ?? [];
+async function recordStaged(
+  root: FileSystemDirectoryHandle,
+  before: string[],
+  namespace: string = pageNamespace,
+): Promise<void> {
+  const added = (await rootEntries(root, namespace)).filter((name) => !before.includes(name));
+  const known = (await readStaged(root, namespace)) ?? [];
   const entries = [...new Set([...known, ...added])].sort();
 
   if (entries.length === known.length && entries.every((name, at) => name === known[at])) return;
 
   await writeFile(
     root,
-    STAGED_MANIFEST,
+    at(STAGED_MANIFEST, namespace),
     new TextEncoder().encode(`${JSON.stringify({ version: 1, entries }, null, 2)}\n`),
   );
 }
@@ -325,10 +363,12 @@ async function recordStaged(root: FileSystemDirectoryHandle, before: string[]): 
  * settings file. Mods are left alone: they are the player's, they are not part
  * of the install, and nothing regenerates them.
  */
-export async function purgeStorage(): Promise<{ data: boolean; settings: boolean }> {
+export async function purgeStorage(
+  namespace: string = pageNamespace,
+): Promise<{ data: boolean; settings: boolean }> {
   const root = await opfsRoot();
 
-  const staged = await readStaged(root);
+  const staged = await readStaged(root, namespace);
   const fixed = ['Content', 'Celeste.exe', 'Celeste.dll', PATCHED_ASSEMBLY, ...PATCHER_ASSEMBLIES];
   const targets = new Set([...(staged ?? fixed), EVEREST_ZIP, EVEREST_DIR]);
 
@@ -336,10 +376,12 @@ export async function purgeStorage(): Promise<{ data: boolean; settings: boolean
   // dropping the whole directory would take both with the install.
   targets.delete('Celeste');
 
-  const removed = await Promise.all([...targets].map((path) => removePath(root, path)));
-  await removePath(root, STAGED_MANIFEST);
+  const removed = await Promise.all(
+    [...targets].map((path) => removePath(root, at(path, namespace))),
+  );
+  await removePath(root, at(STAGED_MANIFEST, namespace));
 
-  const settings = await removePath(root, SAVES_DIR);
+  const settings = await removePath(root, at(SAVES_DIR, namespace));
   return { data: removed.some(Boolean), settings };
 }
 
@@ -372,6 +414,8 @@ function isDerived(path: string): boolean {
 }
 
 export interface InstallExportOptions {
+  /** Storage namespace to read from. Defaults to the page's. */
+  namespace?: string;
   /**
    * Compress the archive. Off, unlike `exportSaves()`, and measured rather than
    * assumed: 634 MB of a 1.1 GB install are FMOD banks, which gzip takes about
@@ -401,7 +445,8 @@ export async function exportInstall(
   const { gzip = false } = options;
 
   const root = await opfsRoot();
-  const files = (await listFiles(root)).filter(({ path }) => !isDerived(path));
+  const ns = options.namespace ?? pageNamespace;
+  const files = (await listFiles(root, at('', ns))).filter(({ path }) => !isDerived(path));
 
   const archive = tarStream(
     (async function* (): AsyncGenerator<TarSource> {
@@ -422,6 +467,8 @@ export async function exportInstall(
 }
 
 export interface InstallImportOptions {
+  /** Storage namespace to write into. Defaults to the page's. */
+  namespace?: string;
   /**
    * Called as files land. There is no total: a tar carries no manifest, so the
    * count is only ever "so far" — which is still what a gigabyte-long restore
@@ -447,19 +494,20 @@ export async function importInstall(
   options: InstallImportOptions = {},
 ): Promise<InstallCheck> {
   const root = await opfsRoot();
-  const before = await rootEntries(root);
+  const ns = options.namespace ?? pageNamespace;
+  const before = await rootEntries(root, ns);
 
   let files = 0;
   let bytes = 0;
   for await (const entry of readTar(await inflateIfGzipped(toStream(archive)))) {
-    await writeFile(root, entry.path, entry.body);
+    await writeFile(root, at(entry.path, ns), entry.body);
     files++;
     bytes += entry.size;
     options.onProgress?.(files, bytes);
   }
 
-  await recordStaged(root, before);
-  return checkStaged(root);
+  await recordStaged(root, before, ns);
+  return checkStaged(root, ns);
 }
 
 function toStream(archive: ReadableStream<Uint8Array> | Blob | Uint8Array): ReadableStream<Uint8Array> {
@@ -798,6 +846,42 @@ export async function load(config: CelesteLoadConfig): Promise<CelesteInstance> 
   const onPointerDown = (): void => focusCanvas();
   canvas.addEventListener('pointerdown', onPointerDown);
 
+  // ------------------------------------------------------- the storage layout
+  //
+  // Where the game lives in storage is settled by the *runtime*, not by
+  // preference: the loader resolves its own absolute paths. Only a runtime
+  // built from source here takes a namespace, so asking a stock one for a
+  // namespace would stage 1.1 GB somewhere it will never look — and the game
+  // would fail much later, saying only that Celeste was not found.
+  //
+  // The build records what it produced, so this is answerable before a byte
+  // moves. A runtime with no descriptor at all is trusted: a host serving
+  // `_framework/` from a CDN copy may not have the file, and refusing to boot
+  // over a missing metadata file would be worse than the mismatch it guards.
+
+  const baseUrlForRuntime = config.jsUrl ? new URL('../', config.jsUrl).href : null;
+
+  const descriptor = await readRuntimeDescriptor(
+    baseUrlForRuntime ??
+      (opts.runtimeBaseUrl
+        ? new URL(opts.runtimeBaseUrl, location.href).href.replace(/\/?$/, '/')
+        : new URL('.', import.meta.url).href),
+    fetchImpl,
+  );
+
+  if (descriptor && (descriptor.storageNamespace ?? '') !== opts.storageNamespace) {
+    const has = descriptor.storageNamespace ?? '';
+    throw new Error(
+      `celeste: options.storageNamespace is ${JSON.stringify(opts.storageNamespace)}, but this runtime keeps the game ` +
+        (has
+          ? `under ${JSON.stringify(has)}.`
+          : 'at the root of the origin private filesystem — the stock loader does not take a namespace.') +
+        ` Set storageNamespace to ${JSON.stringify(has)}, or build a runtime with LOADER_NAMESPACE=${opts.storageNamespace || '-'} (make build-runtime-docker).`,
+    );
+  }
+
+  pageNamespace = opts.storageNamespace;
+
   // ------------------------------------------------------------------- staging
 
   const root = await opfsRoot();
@@ -812,8 +896,8 @@ export async function load(config: CelesteLoadConfig): Promise<CelesteInstance> 
     await stageEverest(root, config, opts, fetchImpl);
   }
 
-  await ensureDirectory(root, MODS_DIR);
-  await ensureDirectory(root, SAVES_DIR);
+  await ensureDirectory(root, at(MODS_DIR));
+  await ensureDirectory(root, at(SAVES_DIR));
 
   // Last chance to read the page: the game deserialises its settings inside
   // `Init()`, a few lines below, and from then on the resolution is its own.
@@ -866,7 +950,11 @@ export async function load(config: CelesteLoadConfig): Promise<CelesteInstance> 
     // renderer lives on. Mounting before it would put the filesystem on the
     // wrong side of the thread boundary.
     await runtime.runMain();
-    await exports.CelesteBootstrap.MountFilesystems(files.root, assemblyList(monoConfig));
+    await exports.CelesteBootstrap.MountFilesystems(
+      files.root,
+      assemblyList(monoConfig),
+      opts.storageNamespace,
+    );
     await exports.CelesteLoader.PreInit();
 
     if (destroyed) return;
@@ -1055,6 +1143,9 @@ const MAX_WINDOW_SCALE = 6;
 /** Celeste's settings file, inside the save directory it shares with the saves. */
 const SETTINGS_FILE = `${SAVES_DIR}/settings.celeste`;
 
+/** …inside the namespace, which is where the game will read it from. */
+const settingsPath = (): string => at(SETTINGS_FILE);
+
 /** Largest whole multiple of the gameplay buffer that fits in `width`×`height`. */
 export function windowScaleFor(width: number, height: number): number {
   const scale = Math.floor(
@@ -1092,12 +1183,12 @@ export function settingsWithWindowScale(settings: string | null, scale: number):
  * is the settings file the game deserialises during `Init()`.
  */
 async function applyWindowScale(root: FileSystemDirectoryHandle, scale: number): Promise<void> {
-  const existing = await readFile(root, SETTINGS_FILE);
+  const existing = await readFile(root, settingsPath());
   const before = existing ? new TextDecoder().decode(existing) : null;
   const after = settingsWithWindowScale(before, scale);
 
   if (after === before) return;
-  await writeFile(root, SETTINGS_FILE, new TextEncoder().encode(after));
+  await writeFile(root, settingsPath(), new TextEncoder().encode(after));
 }
 
 // ---------------------------------------------------------------------- steps
@@ -1140,6 +1231,7 @@ async function stageGame(
     // Everest's backup of the vanilla game doubles the size of an install that
     // was already patched once, and the browser patcher makes its own.
     await extractInto(reader, root, {
+      into: at(''),
       strip: listing.root,
       filter: (path) => !path.startsWith('orig/'),
       onProgress: report,
@@ -1161,7 +1253,7 @@ async function stageGame(
   await copyDirectoryInto(
     listing.root ? await descend(supplied, listing.root) : supplied,
     root,
-    '',
+    at(''),
     report,
   );
   await recordStaged(root, before);
@@ -1188,13 +1280,13 @@ async function stageEverest(
 ): Promise<void> {
   const supplied = toBytes(config.assets?.everest);
   if (supplied) {
-    await writeFile(root, EVEREST_ZIP, supplied instanceof Blob ? new Uint8Array(await supplied.arrayBuffer()) : supplied);
+    await writeFile(root, at(EVEREST_ZIP), supplied instanceof Blob ? new Uint8Array(await supplied.arrayBuffer()) : supplied);
     return;
   }
 
   // Already unpacked by a previous session, and not being replaced.
-  if (!opts.repatch && (await exists(root, EVEREST_MARKER))) return;
-  if (await exists(root, EVEREST_ZIP)) return;
+  if (!opts.repatch && (await exists(root, at(EVEREST_MARKER)))) return;
+  if (await exists(root, at(EVEREST_ZIP))) return;
 
   const url =
     opts.everestSource === 'updater'
@@ -1210,7 +1302,7 @@ async function stageEverest(
   if (!response.ok || !response.body) {
     throw new Error(`celeste: could not fetch the Everest build from ${url} (${response.status})`);
   }
-  await writeFile(root, EVEREST_ZIP, response.body as ReadableStream<Uint8Array>);
+  await writeFile(root, at(EVEREST_ZIP), response.body as ReadableStream<Uint8Array>);
 }
 
 /**
@@ -1225,10 +1317,10 @@ async function patchGame(
   exports: CelesteExports,
   opts: typeof DEFAULT_CELESTE_OPTIONS & CelesteOptions,
 ): Promise<void> {
-  const patched = await exists(root, PATCHED_ASSEMBLY);
+  const patched = await exists(root, at(PATCHED_ASSEMBLY));
   if (patched && !opts.repatch) return;
 
-  if (opts.installEverest && (opts.repatch || !(await exists(root, EVEREST_MARKER)))) {
+  if (opts.installEverest && (opts.repatch || !(await exists(root, at(EVEREST_MARKER))))) {
     if (!(await exports.Patcher.ExtractEverest())) {
       throw new Error('celeste: could not unpack the Everest build');
     }
