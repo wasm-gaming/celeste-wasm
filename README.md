@@ -318,10 +318,11 @@ So the SDK does the only two things that work:
    measures the box, works out the largest window scale that fits (times the
    device pixel ratio, capped at 6 — 1920×1080, because the game composes every
    frame into a 1922×1082 target before it ever reaches the window, so a larger
-   one only upscales the same picture), and writes that one line into
-   `Saves/settings.celeste`, editing the file in place so the player's other
-   settings survive. `options.syncResolution: false` turns this off and leaves
-   whatever the player chose in Options → Video alone.
+   one only upscales the same picture), and writes that one element into
+   `Celeste/Saves/settings.celeste` — the XML `XmlSerializer` wrote, edited in
+   place so the player's other settings survive.
+   `options.syncResolution: false` turns this off and leaves whatever the player
+   chose in Options → Video alone.
 2. **It keeps the box fitted.** On window resizes, on container resizes and
    across fullscreen, the canvas is scaled to the largest 16:9 rectangle that
    fits its container and centred there, with the container showing through

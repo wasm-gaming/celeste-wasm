@@ -912,7 +912,7 @@ export async function load(config: CelesteLoadConfig): Promise<CelesteInstance> 
   // Last chance to read the page: the game deserialises its settings inside
   // `Init()`, a few lines below, and from then on the resolution is its own.
   resolveResolution(true);
-  if (opts.syncResolution) await applyWindowScale(root, windowScale);
+  await applyWindowScale(root, opts.syncResolution ? windowScale : null);
 
   // ------------------------------------------------------------------- runtime
 
@@ -1169,21 +1169,75 @@ export function windowScaleFor(width: number, height: number): number {
 }
 
 /**
+ * A `settings.celeste` written from scratch, for a first run.
+ *
+ * Every element but the one below is left out on purpose: `XmlSerializer`
+ * leaves a missing member at the value the `Settings` constructor gave it, so
+ * this deserialises to exactly what the game would have built for itself —
+ * language picked from the browser, the vanilla bindings, the first-run flow
+ * intact — with the resolution the page asked for and nothing else decided
+ * here.
+ */
+function emptySettings(scale: number): string {
+  return [
+    '<?xml version="1.0"?>',
+    '<Settings xmlns:xsd="http://www.w3.org/2001/XMLSchema" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">',
+    `  <WindowScale>${scale}</WindowScale>`,
+    '</Settings>',
+    '',
+  ].join('\n');
+}
+
+/**
+ * Drop a `WindowScale: N` line, which is not part of this file.
+ *
+ * Everest's *mod* settings are YAML; Celeste's own are XML, and versions of
+ * this package up to 0.1.4 wrote the YAML form into the XML one. Appended after
+ * `</Settings>` it is trailing content past the root element, so the whole
+ * document fails to deserialise and the game starts from its defaults — which
+ * is a player's language, bindings and volumes gone on every reload. Stripping
+ * it puts the document back the way Celeste wrote it.
+ */
+function withoutStrayScaleLine(settings: string): string {
+  return settings.replace(/^[ \t]*WindowScale:[^\n]*(\n|$)/gm, '');
+}
+
+/** `<WindowScale>4</WindowScale>`, or the self-closing form of an empty one. */
+const WINDOW_SCALE_ELEMENT = /<WindowScale\s*(?:\/>|>[^<]*<\/WindowScale\s*>)/;
+
+/**
  * `settings.celeste`, with the window scale set to `scale`.
  *
- * The file is the YAML Celeste writes itself, and the rest of it is the
- * player's — key bindings, audio levels, language — so the one line is edited
- * in place and everything else is left byte for byte. `null` is a first run:
- * the game fills in every other field from its own defaults and writes the
- * whole file back.
+ * The file is the XML Celeste serialises itself, and the rest of it is the
+ * player's — key bindings, audio levels, language — so the one element is
+ * edited in place and everything else is left byte for byte. `null` is a first
+ * run, and so is a file too broken to edit: the game fills in every other field
+ * from its own defaults and writes the whole document back.
  */
 export function settingsWithWindowScale(settings: string | null, scale: number): string {
-  const line = `WindowScale: ${scale}`;
-  if (settings === null) return `${line}\n`;
-  if (/^WindowScale:[^\n]*$/m.test(settings)) {
-    return settings.replace(/^WindowScale:[^\n]*$/m, line);
+  if (settings === null) return emptySettings(scale);
+
+  const repaired = withoutStrayScaleLine(settings);
+  const element = `<WindowScale>${scale}</WindowScale>`;
+
+  if (WINDOW_SCALE_ELEMENT.test(repaired)) {
+    return repaired.replace(WINDOW_SCALE_ELEMENT, element);
   }
-  return `${settings.endsWith('\n') ? settings : `${settings}\n`}${line}\n`;
+
+  // No scale in it, but a document to put one in: in front of the closing tag.
+  // A serialiser that put that tag on a line of its own gets the element on one
+  // too, indented to match; one that wrote the document flat gets it inline.
+  const closing = repaired.search(/<\/Settings\s*>/);
+  if (closing >= 0) {
+    const lineStart = repaired.lastIndexOf('\n', closing) + 1;
+    const indent = repaired.slice(lineStart, closing);
+    if (indent.trim() !== '') {
+      return `${repaired.slice(0, closing)}${element}${repaired.slice(closing)}`;
+    }
+    return `${repaired.slice(0, lineStart)}${indent}  ${element}\n${repaired.slice(lineStart)}`;
+  }
+
+  return emptySettings(scale);
 }
 
 /**
@@ -1195,11 +1249,19 @@ export function settingsWithWindowScale(settings: string | null, scale: number):
  * the render worker from the first pthread onwards, so nothing on the page can
  * resize it afterwards either; and the loader exports no way in. What is left
  * is the settings file the game deserialises during `Init()`.
+ *
+ * `scale` is null when the host turned `syncResolution` off. The file is still
+ * read, because a settings file the versions up to 0.1.4 broke is broken
+ * whether or not the resolution is being synced, and one pass of
+ * `withoutStrayScaleLine` is what puts it back.
  */
-async function applyWindowScale(root: FileSystemDirectoryHandle, scale: number): Promise<void> {
+async function applyWindowScale(root: FileSystemDirectoryHandle, scale: number | null): Promise<void> {
   const existing = await readFile(root, settingsPath());
+  if (!existing && scale === null) return;
+
   const before = existing ? new TextDecoder().decode(existing) : null;
-  const after = settingsWithWindowScale(before, scale);
+  const after =
+    scale === null ? withoutStrayScaleLine(before ?? '') : settingsWithWindowScale(before, scale);
 
   if (after === before) return;
   await writeFile(root, settingsPath(), new TextEncoder().encode(after));

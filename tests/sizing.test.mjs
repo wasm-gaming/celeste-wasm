@@ -27,29 +27,71 @@ test('the scale is capped at 1080p', () => {
   assert.equal(windowScaleFor(3840, 2160), 6);
 });
 
-test('a first run writes the one line', () => {
-  assert.equal(settingsWithWindowScale(null, 6), 'WindowScale: 6\n');
+// `settings.celeste` is what `XmlSerializer` wrote — Celeste's own settings are
+// XML, unlike Everest's *mod* settings, which are YAML. A document that does not
+// parse is not a document the game repairs: it starts from its defaults, which
+// is the player's language, bindings and volumes gone.
+
+/** What the game writes, near enough: the shape and the indentation are its. */
+const settingsFile = (body) =>
+  '<?xml version="1.0"?>\n' +
+  '<Settings xmlns:xsd="http://www.w3.org/2001/XMLSchema" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">\n' +
+  body +
+  '</Settings>\n';
+
+test('a first run writes a document the game can read', () => {
+  assert.equal(settingsWithWindowScale(null, 6), settingsFile('  <WindowScale>6</WindowScale>\n'));
 });
 
 test('an existing scale is replaced where it stands', () => {
-  const before = 'Language: english\nWindowScale: 3\nVSync: true\n';
-  assert.equal(
-    settingsWithWindowScale(before, 6),
-    'Language: english\nWindowScale: 6\nVSync: true\n',
-  );
+  const body = (scale) =>
+    `  <Language>spanish</Language>\n  <WindowScale>${scale}</WindowScale>\n  <VSync>true</VSync>\n`;
+  assert.equal(settingsWithWindowScale(settingsFile(body(3)), 6), settingsFile(body(6)));
 });
 
 test("the player's other settings survive untouched", () => {
-  const before = 'Language: english\nMusicVolume: 7\n';
-  assert.equal(settingsWithWindowScale(before, 4), 'Language: english\nMusicVolume: 7\nWindowScale: 4\n');
+  const before = settingsFile('  <Language>spanish</Language>\n  <MusicVolume>7</MusicVolume>\n');
+  assert.equal(
+    settingsWithWindowScale(before, 4),
+    settingsFile(
+      '  <Language>spanish</Language>\n  <MusicVolume>7</MusicVolume>\n  <WindowScale>4</WindowScale>\n',
+    ),
+  );
 });
 
-test('a file with no trailing newline gains one', () => {
-  assert.equal(settingsWithWindowScale('Language: english', 4), 'Language: english\nWindowScale: 4\n');
+test('an empty element is filled in rather than doubled', () => {
+  const before = settingsFile('  <WindowScale />\n');
+  assert.equal(settingsWithWindowScale(before, 5), settingsFile('  <WindowScale>5</WindowScale>\n'));
 });
 
-test('only a key of its own is rewritten', () => {
-  // Everest adds settings of its own, and a substring match would corrupt them.
-  const before = 'CelesteNetWindowScale: 2\nWindowScale: 2\n';
-  assert.equal(settingsWithWindowScale(before, 5), 'CelesteNetWindowScale: 2\nWindowScale: 5\n');
+test('a document written flat keeps its shape', () => {
+  const before = '<Settings><Language>spanish</Language></Settings>';
+  assert.equal(
+    settingsWithWindowScale(before, 2),
+    '<Settings><Language>spanish</Language><WindowScale>2</WindowScale></Settings>',
+  );
+});
+
+test('the YAML line older versions appended is taken back out', () => {
+  // Up to 0.1.4 this package wrote Everest's mod-settings syntax into Celeste's
+  // own file. After `</Settings>` it is content past the root element, so the
+  // game read no settings at all and started from its defaults every time.
+  const body = '  <Language>spanish</Language>\n  <WindowScale>3</WindowScale>\n';
+  assert.equal(
+    settingsWithWindowScale(`${settingsFile(body)}WindowScale: 6\n`, 6),
+    settingsFile('  <Language>spanish</Language>\n  <WindowScale>6</WindowScale>\n'),
+  );
+});
+
+test('a file that is nothing but the old line becomes a document', () => {
+  assert.equal(settingsWithWindowScale('WindowScale: 6\n', 4), settingsFile('  <WindowScale>4</WindowScale>\n'));
+});
+
+test('only the element itself is rewritten', () => {
+  // A substring match would corrupt whatever else carries the name.
+  const before = settingsFile('  <CelesteNetWindowScale>2</CelesteNetWindowScale>\n  <WindowScale>2</WindowScale>\n');
+  assert.equal(
+    settingsWithWindowScale(before, 5),
+    settingsFile('  <CelesteNetWindowScale>2</CelesteNetWindowScale>\n  <WindowScale>5</WindowScale>\n'),
+  );
 });
