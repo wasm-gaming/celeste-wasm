@@ -170,6 +170,13 @@ jobs:
       # Trusted publishing: npm mints the token from this run's OIDC identity,
       # so there is no long-lived secret in the repository.
       id-token: write
+    # Part of that identity, and it has to match the trusted publisher registered
+    # for the package on npmjs.com. Without it the OIDC token carries no
+    # environment claim, npm declines to mint a token for a publisher that asks
+    # for one, and the CLI publishes anonymously — which the registry answers
+    # with a 404 on the package rather than a 401, so it reads like the package
+    # is missing when the real story is that nobody is logged in.
+    environment: production
     steps:
       # No checkout. The tarball is self-contained — npm reads the manifest out
       # of it — and the tree at GITHUB_SHA is the one from *before* the bump, so
